@@ -1,0 +1,524 @@
+**Phase 0 — Setup (Day 0–1)**
+
+
+
+Goal: Get the project skeleton running
+
+
+
+Tasks:
+
+
+
+Setup Spring Boot backend + WebSocket-----------------------------------Done
+
+
+
+Setup Next.js frontend (chat UI)----------------------------------------Later  
+
+
+
+Configure DB (Postgres/MySQL)-------------------------------------------Done
+
+
+
+Dockerize DB (optional at this stage)-----------------------------------Later
+
+
+
+Git repo, basic folder structure----------------------------------------Done
+
+
+
+Metrics: None yet
+
+Tools: N/A
+
+
+
+Notes: Focus on just connecting frontend → backend → DB.
+
+
+
+**Phase 1 — MVP (Day 1–3)**
+
+
+
+Goal: Build working rooms + chat without optimizations------------------Done
+
+
+
+Tasks:
+
+
+
+REST APIs: create/join rooms, list rooms--------------------------------Done
+
+
+
+WebSocket: send/receive messages----------------------------------------Done
+
+
+
+User login (basic, can be dummy)   {Password => user/User and admin}----Done
+
+
+
+Store messages in DB----------------------------------------------------Done
+
+
+
+Metrics to measure (baseline):
+
+
+
+Message latency (p95) → time from user sending message → all users in room see it
+
+
+
+Max concurrent users → how many WebSocket connections can backend handle before lag/drops
+
+
+
+Messages per second → number of messages successfully delivered
+
+
+
+How to measure:
+
+
+
+WebSocket connection counter (custom metric, server-side)
+
+
+
+Custom latency measurement: record timestamp on send, timestamp on receive, calculate delta
+
+
+
+Load testing: k6 (WebSocket script) or JMeter
+
+
+
+Tools:
+
+
+
+Spring Boot + WebSocket
+
+
+
+k6 / JMeter for load testing
+
+
+
+Spring Actuator (optional here for basic CPU/memory)
+
+
+
+Resume angle: This is your “before optimization” benchmark.
+
+
+
+**Phase 2 — Observability (Day 3–5)**
+
+
+
+Goal: Monitor your app with real metrics
+
+
+
+Tasks:
+
+
+
+Add Spring Actuator
+
+
+
+Add Micrometer
+
+
+
+Add custom metrics:
+
+
+
+message\_delivery\_latency
+
+
+
+active\_connections
+
+
+
+messages\_per\_second
+
+
+
+Expose metrics endpoint /actuator/metrics
+
+
+
+Optional: connect to Prometheus + Grafana for dashboard
+
+
+
+Metrics to measure:
+
+
+
+Same as Phase 1, but now continuous, real-time metrics
+
+
+
+CPU/memory usage
+
+
+
+Tools:
+
+
+
+Spring Actuator
+
+
+
+Micrometer
+
+
+
+Prometheus + Grafana (optional)
+
+
+
+Notes: At this stage you are ready to quantify every improvement you do.
+
+
+
+Phase 3 — Backend optimization (Day 5–8)
+
+
+
+Goal: Reduce latency \& increase throughput
+
+
+
+Tasks:
+
+
+
+Add async message processing (Spring @Async or ThreadPool)
+
+
+
+Optimize DB queries (indexes, batch inserts)
+
+
+
+Add Redis caching (active room data, participants)
+
+
+
+Metrics to measure (post-optimization):
+
+
+
+p95 message latency (target: reduce ~3–5×)
+
+
+
+Messages per second (target: increase 2–5×)
+
+
+
+CPU usage
+
+
+
+DB hits per message
+
+
+
+How to measure:
+
+
+
+Micrometer timers (message\_delivery\_latency)
+
+
+
+Actuator metrics for connections
+
+
+
+Redis monitor (INFO command)
+
+
+
+Tools:
+
+
+
+Spring Boot async/thread pools
+
+
+
+Redis
+
+
+
+k6 / JMeter
+
+
+
+Resume angle: Now you can say, e.g.:
+
+
+
+“Reduced message latency from 600ms → 150ms using async processing \& Redis caching”
+
+
+
+Phase 4 — Docker + horizontal scaling (Day 8–10)
+
+
+
+Goal: Run multiple backend instances on same machine → simulate real-world scaling
+
+
+
+Tasks:
+
+
+
+Dockerize backend (Spring Boot)
+
+
+
+Run 2–3 backend containers (ports 8080, 8081, 8082)
+
+
+
+Optional: Nginx or HAProxy load balancer
+
+
+
+Redis Pub/Sub for message fan-out between instances
+
+
+
+Metrics to measure (post-Docker / scaling):
+
+
+
+Max concurrent users → see improvement vs single instance
+
+
+
+Messages per second
+
+
+
+Latency (should remain low even at higher load)
+
+
+
+CPU/memory per instance
+
+
+
+Tools:
+
+
+
+Docker
+
+
+
+Nginx / HAProxy (optional)
+
+
+
+k6 / JMeter
+
+
+
+Resume angle:
+
+
+
+“Scaled backend horizontally using Docker + Redis, handling 3× more concurrent users with p95 latency under 200ms”
+
+
+
+Phase 5 — Production-grade features (Day 10–12)
+
+
+
+Goal: Add reliability, safety, and user experience features
+
+
+
+Tasks:
+
+
+
+JWT auth → secure endpoints
+
+
+
+Rate limiting per room / per user
+
+
+
+Room capacity limits → max 50 users per room
+
+
+
+Auto room cleanup → delete empty rooms after X minutes
+
+
+
+Metrics to measure:
+
+
+
+Messages per second under stress → ensure rate limiting works
+
+
+
+Message drops → should be minimal
+
+
+
+Room cleanup → memory usage / DB size reduction
+
+
+
+Active connections → ensures room capacity is enforced
+
+
+
+Tools:
+
+
+
+Spring Security (JWT)
+
+
+
+Bucket4j or Redis for rate limiting
+
+
+
+Spring Scheduler / Quartz for room cleanup
+
+
+
+Resume angle:
+
+
+
+“Implemented JWT authentication, rate limiting, and auto room cleanup to improve reliability and maintain system performance under load”
+
+
+
+Phase 6 — Load testing / final benchmarking (Day 12–14)
+
+
+
+Goal: Generate final quantifiable metrics for resume
+
+
+
+Tasks:
+
+
+
+Run full load tests:
+
+
+
+Users: 100 → 1,000+ concurrent
+
+
+
+Message bursts: 1–10 msgs/sec per user
+
+
+
+Record:
+
+
+
+Max concurrent users
+
+
+
+p95 message latency
+
+
+
+Messages per second
+
+
+
+CPU/memory usage
+
+
+
+Optional: record before/after numbers for each optimization (baseline vs final)
+
+
+
+Tools:
+
+
+
+k6 / JMeter
+
+
+
+Micrometer + Prometheus dashboard
+
+
+
+Resume-ready bullets examples:
+
+
+
+“Designed and optimized AnimeTalk backend to support 3,000 concurrent users, achieving p95 message latency of 150ms using Redis caching and asynchronous processing.”
+
+
+
+“Scaled backend horizontally with Docker, increasing throughput 5× and reducing CPU usage per instance by 40%.”
+
+
+
+
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+**Web Socket**
+
+
+
+It is a persistent connection between a client and a server. Bidirectional Full Duplex.
+
+Used to build Real time system. (Trading Apps)
+
+WebSocket connection can be viewed in Network tab => WS
+
+first WS sends a HTTP request to upgrade connection , Server responds with 101 (Switching Protocol Response)
+
+client will connect to registry endpoint in registerStompEndpoints
+
+@SendTo("/topic/messages") Client subscribed to this endpoint will receive the broadcast message 
+
+
+
