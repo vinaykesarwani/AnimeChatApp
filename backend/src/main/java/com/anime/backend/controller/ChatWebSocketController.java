@@ -51,10 +51,10 @@ public class ChatWebSocketController {
         }
 
         Message saved = messageRepo.save(msg);
-
+        saved.setTempId(dto.getTempId()); 
         messagingTemplate.convertAndSend(
             "/topic/chat/" + roomId,
-            new MessageEvent("CREATE", saved, null)
+            new MessageEvent("CREATE", saved, null, System.currentTimeMillis())
         );
     }
 
@@ -73,7 +73,7 @@ public class ChatWebSocketController {
 
         messagingTemplate.convertAndSend(
             "/topic/chat/" + msg.getDiscussionRoom().getId(),
-            new MessageEvent("EDIT", updated, null)
+            new MessageEvent("EDIT", updated, null, System.currentTimeMillis())
         );
     }
 
@@ -92,7 +92,7 @@ public class ChatWebSocketController {
 
         messagingTemplate.convertAndSend(
             "/topic/chat/" + roomId,
-            new MessageEvent("DELETE", null, dto.getMessageId())
+            new MessageEvent("DELETE", null, dto.getMessageId(), System.currentTimeMillis())
         );
     }
 }

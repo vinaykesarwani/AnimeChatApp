@@ -7,4 +7,5 @@ public class ChatMessageDto {
     private String content;
     private Long discussionRoomId;
     private Long replyToMessageId;
+    private String tempId;
 }

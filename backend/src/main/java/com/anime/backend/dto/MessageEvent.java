@@ -10,4 +10,5 @@ public class MessageEvent {
     private String type; // CREATE, EDIT, DELETE
     private Message message;
     private Long messageId;
+    private Long sentAt; 
 }

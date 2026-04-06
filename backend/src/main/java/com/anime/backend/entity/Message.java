@@ -31,4 +31,7 @@ public class Message {
     private boolean deleted = false;
 
     private LocalDateTime createdAt = LocalDateTime.now();
+
+    @Transient
+    private String tempId;
 }
