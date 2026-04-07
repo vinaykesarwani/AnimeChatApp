@@ -1,9 +1,10 @@
 package com.anime.backend.service;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+import org.springframework.web.server.ResponseStatusException;
 import com.anime.backend.dto.UserCreateDto;
 import com.anime.backend.dto.UserUpdateDto;
 import com.anime.backend.entity.Role;
@@ -23,10 +24,13 @@ public class UserService {
     }
 
     public User createUser(UserCreateDto dto) {
+        if (userRepo.findByUsername(dto.getUsername()).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Username already taken");
+        }
         User user = new User();
         user.setUsername(dto.getUsername());
         user.setPassword(encoder.encode(dto.getPassword()));
-        user.setRole(dto.getRole());
+        user.setRole(dto.getRole() != null ? dto.getRole() : Role.USER);
         return userRepo.save(user);
     }
 
