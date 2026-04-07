@@ -63,10 +63,10 @@ export function AuthProvider({ children }) {
   const register = async (username, password) => {
     try {
       await api.post('/api/users', { username, password });
-      return await login(username, password);
     } catch (err) {
       return { success: false, error: err.response?.data || 'Registration failed' };
     }
+    return await login(username, password);
   };
 
   return (

@@ -10,11 +10,13 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.anime.backend.dto.UserCreateDto;
 import com.anime.backend.dto.UserUpdateDto;
+import com.anime.backend.entity.Role;
 import com.anime.backend.entity.User;
 import com.anime.backend.repository.UserRepository;
 import com.anime.backend.service.UserService;
@@ -32,6 +34,7 @@ public class UserController {
     }
 
     @PostMapping
+    @ResponseStatus(HttpStatus.CREATED) 
     public User create(@RequestBody UserCreateDto dto) {
         return userService.createUser(dto);
     }
@@ -59,7 +62,7 @@ public class UserController {
 
         // self OR admin
         if (!loggedIn.getId().equals(id) &&
-            !loggedIn.getRole().equals("ADMIN")) {
+            loggedIn.getRole() != Role.ADMIN) {   // ✅ enum comparison
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
         }
 
