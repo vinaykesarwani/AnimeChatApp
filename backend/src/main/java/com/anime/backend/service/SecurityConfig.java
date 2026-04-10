@@ -87,6 +87,9 @@ public class SecurityConfig {
                 // Public: register new user
                 .requestMatchers(HttpMethod.POST, "/api/users").permitAll()
 
+                // Public: similarity check (reads only public room titles)
+                .requestMatchers(HttpMethod.POST, "/api/similarity/check").permitAll()
+
                 // ADMIN only: modify/delete anime rooms
                 .requestMatchers(HttpMethod.PUT, "/api/anime-rooms/**").hasRole("ADMIN")
                 .requestMatchers(HttpMethod.DELETE, "/api/anime-rooms/**").hasRole("ADMIN")
