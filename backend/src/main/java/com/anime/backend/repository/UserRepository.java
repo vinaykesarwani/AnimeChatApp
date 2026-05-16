@@ -1,11 +1,13 @@
 package com.anime.backend.repository;
 
-import java.util.Optional;
-
+import com.anime.backend.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import com.anime.backend.entity.User;
+import java.util.Optional;
 
 public interface UserRepository extends JpaRepository<User, Long> {
+
     Optional<User> findByUsername(String username);
+
+    Optional<User> findByGoogleId(String googleId);
 }

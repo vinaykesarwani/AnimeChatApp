@@ -31,3 +31,19 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Node
+node_modules/
+.cache/
+*.log
+
+# Env
+.env
+env
+
+# Build artifacts
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

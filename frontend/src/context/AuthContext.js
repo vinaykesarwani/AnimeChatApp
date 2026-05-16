@@ -3,60 +3,90 @@ import api from '../services/api';
 
 const AuthContext = createContext(null);
 
+const TOKEN_KEY = 'animechat_token';
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
-  // credentials stored as React state so they are ALWAYS in sync with user —
-  // no render can have user set but credentials missing (which caused the WS
-  // to briefly see null credentials, tear down, and show "not connected")
-  const [credentials, setCredentials] = useState(null);
+  // Keep the token in state so useWebSocket can read it reactively
+  const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /** Persist token, set axios header, and fetch the current user. */
+  const applyToken = async (jwt) => {
+    localStorage.setItem(TOKEN_KEY, jwt);
+    api.defaults.headers.common['Authorization'] = `Bearer ${jwt}`;
+    setToken(jwt);
+    const res = await api.get('/api/users/self');
+    setUser(res.data);
+  };
+
+  const clearSession = () => {
+    localStorage.removeItem(TOKEN_KEY);
+    delete api.defaults.headers.common['Authorization'];
+    setToken(null);
+    setUser(null);
+  };
+
+  // ── Restore session on page load ───────────────────────────────────────────
+
   useEffect(() => {
-    const savedCreds = localStorage.getItem('animechat_creds');
-    if (savedCreds) {
-      const { username, password } = JSON.parse(savedCreds);
-      api.defaults.auth = { username, password };
+    const savedToken = localStorage.getItem(TOKEN_KEY);
+    if (savedToken) {
+      api.defaults.headers.common['Authorization'] = `Bearer ${savedToken}`;
       api.get('/api/users/self')
         .then(res => {
-          // Set user AND credentials in the same tick
+          setToken(savedToken);
           setUser(res.data);
-          setCredentials({ username, password });
         })
-        .catch(() => {
-          localStorage.removeItem('animechat_creds');
-          api.defaults.auth = null;
-        })
+        .catch(() => clearSession())
         .finally(() => setLoading(false));
     } else {
       setLoading(false);
     }
   }, []);
 
-  const logout = () => {
-    setUser(null);
-    setCredentials(null);
-    api.defaults.auth = null;
-    localStorage.removeItem('animechat_creds');
-  };
+  // ── Auth actions ───────────────────────────────────────────────────────────
 
+  const logout = () => clearSession();
+
+  /**
+   * Username/password login:
+   * 1. Send Basic credentials to /api/auth/token
+   * 2. Receive a JWT — store it and never touch the raw password again
+   */
   const login = async (username, password) => {
-    // Clear previous session atomically before attempting new login
-    setUser(null);
-    setCredentials(null);
-    api.defaults.auth = null;
-    localStorage.removeItem('animechat_creds');
-
-    api.defaults.auth = { username, password };
+    clearSession();
     try {
-      const res = await api.get('/api/users/self');
-      // Set user AND credentials atomically — one render, no gap
-      setUser(res.data);
-      setCredentials({ username, password });
-      localStorage.setItem('animechat_creds', JSON.stringify({ username, password }));
+      // Temporarily set Basic auth just for this one call
+      const res = await api.post('/api/auth/token', {}, {
+        auth: { username, password },
+      });
+      await applyToken(res.data.token);
       return { success: true };
     } catch (err) {
-      api.defaults.auth = null;
-      return { success: false, error: err.response?.status === 401 ? 'Invalid username or password' : 'Login failed' };
+      clearSession();
+      return {
+        success: false,
+        error: err.response?.status === 401
+          ? 'Invalid username or password'
+          : 'Login failed',
+      };
+    }
+  };
+
+  /**
+   * Called by OAuthCallbackPage after Google redirects back with a token.
+   * The token was minted by the backend's OAuthSuccessHandler.
+   */
+  const loginWithToken = async (jwt) => {
+    try {
+      await applyToken(jwt);
+      return { success: true };
+    } catch {
+      clearSession();
+      return { success: false, error: 'OAuth login failed' };
     }
   };
 
@@ -70,7 +100,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, credentials, loading, login, logout, register }}>
+    <AuthContext.Provider value={{ user, token, loading, login, loginWithToken, logout, register }}>
       {children}
     </AuthContext.Provider>
   );

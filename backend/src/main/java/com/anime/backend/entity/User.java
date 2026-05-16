@@ -1,4 +1,5 @@
 package com.anime.backend.entity;
+
 import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import jakarta.persistence.*;
@@ -16,10 +17,21 @@ public class User {
     @Column(unique = true, nullable = false)
     private String username;
 
+    // Nullable: Google-only users have no password
     @JsonIgnore
-    @Column(nullable = false)
+    @Column(nullable = true)
     private String password;
 
     @Enumerated(EnumType.STRING)
     private Role role;
+
+    // --- OAuth2 fields (null for username/password users) ---
+
+    /** Google's unique "sub" claim — stable even if the user changes their email. */
+    @Column(unique = true, nullable = true)
+    private String googleId;
+
+    /** Stored for display and lookup convenience; not used for auth. */
+    @Column(nullable = true)
+    private String email;
 }
