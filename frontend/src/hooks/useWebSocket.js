@@ -4,25 +4,30 @@ import { Client } from '@stomp/stompjs';
 
 const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 
-export function useWebSocket(roomId, credentials, onMessage) {
+/**
+ * useWebSocket now accepts `token` (a JWT string) instead of `credentials`
+ * (username + password). The token is sent as the STOMP passcode header and
+ * validated by WebSocketAuthChannelInterceptor on the backend.
+ *
+ * Usage: const ws = useWebSocket(roomId, token, onMessage);
+ */
+export function useWebSocket(roomId, token, onMessage) {
   const clientRef = useRef(null);
-  const [status, setStatus] = useState('disconnected'); // 'connecting' | 'connected' | 'disconnected'
+  const [status, setStatus] = useState('disconnected');
 
   useEffect(() => {
-    if (!roomId || !credentials?.username || !credentials?.password) return;
+    if (!roomId || !token) return;
 
-    // Mark as connecting immediately — prevents the brief window where the old
-    // client's onDisconnect fires 'disconnected' and the user sees "not connected"
     setStatus('connecting');
-
-    // Use a flag to ignore disconnect events from the OLD client during cleanup
     let active = true;
 
     const client = new Client({
       webSocketFactory: () => new SockJS(`${BASE_URL}/ws`),
       connectHeaders: {
-        login: credentials.username,
-        passcode: credentials.password,
+        // Send the JWT as the passcode. The backend interceptor will verify it.
+        // We use a fixed "jwt" login so the interceptor knows which auth mode to use.
+        login: 'jwt',
+        passcode: token,
       },
       reconnectDelay: 3000,
       onConnect: () => {
@@ -38,26 +43,23 @@ export function useWebSocket(roomId, credentials, onMessage) {
         });
       },
       onDisconnect: () => { if (active) setStatus('disconnected'); },
-      onStompError: () => { if (active) setStatus('disconnected'); },
+      onStompError:  () => { if (active) setStatus('disconnected'); },
     });
 
     client.activate();
     clientRef.current = client;
 
     return () => {
-      active = false; // stop old client from updating status
+      active = false;
       client.deactivate();
-      // Don't null clientRef here — nulling it creates a gap between old client
-      // teardown and new client assignment where sendMessage always returns false
     };
-  }, [roomId, credentials?.username, credentials?.password]);
+  }, [roomId, token]);
 
   const sendMessage = useCallback((content, replyToMessageId = null) => {
     if (!clientRef.current?.connected) return false;
-    const payload = { content, replyToMessageId };
     clientRef.current.publish({
       destination: `/app/chat.send/${roomId}`,
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ content, replyToMessageId }),
     });
     return true;
   }, [roomId]);

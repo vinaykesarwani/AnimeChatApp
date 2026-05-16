@@ -25,7 +25,7 @@ function isSameDay(a, b) {
 
 export default function ChatPage() {
   const { roomId } = useParams();
-  const { user, credentials } = useAuth();
+  const { user, token } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -38,7 +38,7 @@ export default function ChatPage() {
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // credentials comes directly from AuthContext where it is set atomically
+  // token comes directly from AuthContext where it is set atomically
   // with user — eliminating the render gap that caused "not connected"
 
   // WS handler
@@ -58,7 +58,7 @@ export default function ChatPage() {
   }, []);
 
   const { status, sendMessage, editMessage, deleteMessage } = useWebSocket(
-    roomId, credentials, handleWsMessage
+    roomId, token, handleWsMessage
   );
 
   // Load room info & history

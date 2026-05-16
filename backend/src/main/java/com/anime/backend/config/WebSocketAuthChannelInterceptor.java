@@ -13,26 +13,32 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
 /**
- * Authenticates STOMP CONNECT frames using the login/passcode headers.
+ * Authenticates STOMP CONNECT frames.
  *
- * Without this, Spring Security only authenticates the HTTP upgrade (SockJS
- * handshake) request, but the resulting Principal is not automatically
- * propagated to the STOMP messaging channel for all users. Admin users were
- * silently failing because their Principal was null in @MessageMapping handlers,
- * causing a NullPointerException on principal.getName() which swallowed the
- * message and prevented sending/editing/deleting.
+ * Supports two modes:
+ *
+ *   1. JWT mode (used by all frontend clients after this change):
+ *      login   = "jwt"
+ *      passcode = <the JWT token>
+ *
+ *   2. Password mode (legacy fallback — kept for any direct STOMP clients):
+ *      login   = <username>
+ *      passcode = <raw password>
  */
 @Component
 public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
 
     private final UserDetailsService userDetailsService;
     private final PasswordEncoder passwordEncoder;
+    private final JwtUtil jwtUtil;
 
     public WebSocketAuthChannelInterceptor(
             UserDetailsService userDetailsService,
-            PasswordEncoder passwordEncoder) {
+            PasswordEncoder passwordEncoder,
+            JwtUtil jwtUtil) {
         this.userDetailsService = userDetailsService;
         this.passwordEncoder = passwordEncoder;
+        this.jwtUtil = jwtUtil;
     }
 
     @Override
@@ -41,17 +47,30 @@ public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
                 MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
 
         if (accessor != null && StompCommand.CONNECT.equals(accessor.getCommand())) {
-            String username = accessor.getLogin();
-            String password = accessor.getPasscode();
+            String login    = accessor.getLogin();
+            String passcode = accessor.getPasscode();
 
-            if (username != null && password != null) {
+            if (login != null && passcode != null) {
                 try {
-                    UserDetails userDetails = userDetailsService.loadUserByUsername(username);
-                    if (passwordEncoder.matches(password, userDetails.getPassword())) {
-                        UsernamePasswordAuthenticationToken auth =
-                                new UsernamePasswordAuthenticationToken(
-                                        userDetails, null, userDetails.getAuthorities());
-                        accessor.setUser(auth);
+                    if ("jwt".equals(login)) {
+                        // ── JWT mode ──────────────────────────────────────
+                        if (jwtUtil.validateToken(passcode)) {
+                            String username = jwtUtil.extractUsername(passcode);
+                            UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                            UsernamePasswordAuthenticationToken auth =
+                                    new UsernamePasswordAuthenticationToken(
+                                            userDetails, null, userDetails.getAuthorities());
+                            accessor.setUser(auth);
+                        }
+                    } else {
+                        // ── Password mode (legacy) ─────────────────────────
+                        UserDetails userDetails = userDetailsService.loadUserByUsername(login);
+                        if (passwordEncoder.matches(passcode, userDetails.getPassword())) {
+                            UsernamePasswordAuthenticationToken auth =
+                                    new UsernamePasswordAuthenticationToken(
+                                            userDetails, null, userDetails.getAuthorities());
+                            accessor.setUser(auth);
+                        }
                     }
                 } catch (Exception e) {
                     // Invalid credentials — leave user as null, connection will be rejected
