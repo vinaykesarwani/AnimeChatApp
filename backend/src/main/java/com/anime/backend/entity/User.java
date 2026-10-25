@@ -1,6 +1,6 @@
 package com.anime.backend.entity;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Data;
 
@@ -16,12 +16,19 @@ public class User {
     @Column(unique = true, nullable = false)
     private String username;
 
+    // OAuth-only accounts do not have a local password.
     @JsonIgnore
-    @Column(nullable = false)
     private String password;
 
     @Enumerated(EnumType.STRING)
     private Role role;
+
+    @Column(unique = true)
+    @JsonIgnore
+    private String googleId;
+
+    @JsonIgnore
+    private String email;
 
     @Column(name = "oauth_id", unique = true)
     @JsonIgnore

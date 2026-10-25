@@ -1,22 +1,29 @@
 // src/pages/OAuthCallbackPage.js
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 
 export default function OAuthCallbackPage() {
   const [searchParams]   = useSearchParams();
-  const { handleOAuthCallback } = useAuth();
+  const { loading, handleOAuthCallback } = useAuth();
   const { addToast }     = useToast();
   const navigate         = useNavigate();
   const [error, setError] = useState('');
+  const handled = useRef(false);
 
   useEffect(() => {
+    // Finish session restoration before exchanging the new token. StrictMode replays effects.
+    if (loading || handled.current) return;
+    handled.current = true;
+
     const token = searchParams.get('token');
     const err   = searchParams.get('error');
 
     if (err || !token) {
-      setError(err || 'OAuth login failed. Please try again.');
+      setError(err === 'account_link_required'
+        ? 'We could not safely match your existing account. Please sign in with your original method.'
+        : 'Sign-in failed. Please try again.');
       return;
     }
 
@@ -28,7 +35,7 @@ export default function OAuthCallbackPage() {
         setError(result.error);
       }
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loading, searchParams, handleOAuthCallback, addToast, navigate]);
 
   if (error) {
     return (

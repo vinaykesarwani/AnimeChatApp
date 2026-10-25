@@ -1,8 +1,8 @@
 # Run the load tests
 
-These commands use PowerShell. Install Java 21, Node.js, k6 and MySQL first. Java, Node.js and k6 should be on PATH, and JAVA_HOME should point to your JDK.
+Use PowerShell. Install Java 21, Node.js, k6 and MySQL. Add Java, Node.js and k6 to PATH. Set JAVA_HOME to your JDK.
 
-Run the tests one at a time. The full set takes about 95 minutes.
+Run one test at a time. All ten runs take about 95 minutes.
 
 ## 1. Check MySQL and local settings
 
@@ -10,11 +10,11 @@ Run the tests one at a time. The full set takes about 95 minutes.
 Get-Service MySQL80
 ```
 
-The status should be `Running`. Set up `backend/.env` using [backend/.env.example](../backend/.env.example), including your local database credentials. Keep the actual `.env` file out of Git.
+The service should show `Running`. Fill in `backend/.env` using [backend/.env.example](../backend/.env.example). Use your local MySQL credentials. Keep `.env` out of Git.
 
 ## 2. Build and start the backend
 
-Open PowerShell at the project root:
+From the project root:
 
 ```powershell
 cd backend
@@ -27,11 +27,11 @@ $env:PORT = '18080'
 java -Dspring.devtools.restart.enabled=false -jar ./target/backend-0.0.1-SNAPSHOT.jar --spring.jpa.show-sql=false --logging.level.org.springframework.security=WARN
 ```
 
-This creates a fresh benchmark database. Your MySQL user needs permission to create it. Wait for `Started BackendApplication` and leave this terminal running.
+This uses a new benchmark database. Your MySQL user must be allowed to create it. Wait for `Started BackendApplication`. Leave this terminal open.
 
 ## 3. Create test users and rooms
 
-Open a second PowerShell terminal at the project root. Use this same terminal for all remaining commands.
+Open a second PowerShell terminal at the project root. Run the rest of the commands there.
 
 ```powershell
 $env:BASE_URL = 'http://localhost:18080'
@@ -43,9 +43,9 @@ $env:ROOM_COUNT = '28'
 node k6/seed.js
 ```
 
-PASSWORD is for the test chat accounts. The seed command creates and verifies 100 accounts.
+`PASSWORD` is for the test chat accounts. The seed creates and checks 100 accounts.
 
-The commands below assume it prints room IDs `1` through `28`. If the IDs differ, use the printed IDs in the same order. Each test gets separate rooms so it starts with empty history.
+The commands below use room IDs `1` to `28`. Replace them with the IDs printed by the seed if needed. Use different rooms for each run so the history starts empty.
 
 ## 4. Set the workload and report folder
 
@@ -68,7 +68,7 @@ k6 run -e PROFILE=smoke -e TOPOLOGY=multi -e PEAK_VUS=3 -e HOLD_SECONDS=20 -e RO
 
 ## 6. Run steady-load tests
 
-100 users, with a five-minute hold in each test:
+Hold 100 virtual users for 5 minutes.
 
 ```powershell
 k6 run -e PROFILE=steady -e TOPOLOGY=single -e PEAK_VUS=100 -e HOLD_SECONDS=300 -e ROOM_IDS=5 -e "REPORT_PREFIX=$reports/steady-single" k6/load-test.js
@@ -77,7 +77,7 @@ k6 run -e PROFILE=steady -e TOPOLOGY=multi -e PEAK_VUS=100 -e HOLD_SECONDS=300 -
 
 ## 7. Run stress tests
 
-The profile ramps through 25, 50 and 100 users, holding each level for one minute.
+Ramp through 25, 50 and 100 virtual users. Hold each level for 1 minute.
 
 ```powershell
 k6 run -e PROFILE=stress -e TOPOLOGY=single -e PEAK_VUS=100 -e ROOM_IDS=11 -e "REPORT_PREFIX=$reports/stress-single" k6/load-test.js
@@ -86,7 +86,7 @@ k6 run -e PROFILE=stress -e TOPOLOGY=multi -e PEAK_VUS=100 -e ROOM_IDS=12,13,14,
 
 ## 8. Run spike tests
 
-The profile starts at 10 users, ramps to 100 in five seconds, holds for 30 seconds, then returns to lower load.
+Ramp from 10 to 100 users in 5 seconds. Hold for 30 seconds, then reduce the load.
 
 ```powershell
 k6 run -e PROFILE=spike -e TOPOLOGY=single -e PEAK_VUS=100 -e ROOM_IDS=17 -e "REPORT_PREFIX=$reports/spike-single" k6/load-test.js
@@ -95,7 +95,7 @@ k6 run -e PROFILE=spike -e TOPOLOGY=multi -e PEAK_VUS=100 -e ROOM_IDS=18,19,20,2
 
 ## 9. Run soak tests
 
-20 users, with a full 30-minute hold in each test:
+Hold 20 virtual users for 30 minutes.
 
 ```powershell
 k6 run -e PROFILE=soak -e TOPOLOGY=single -e PEAK_VUS=20 -e HOLD_SECONDS=1800 -e ROOM_IDS=23 -e "REPORT_PREFIX=$reports/soak-single" k6/load-test.js
@@ -104,14 +104,14 @@ k6 run -e PROFILE=soak -e TOPOLOGY=multi -e PEAK_VUS=20 -e HOLD_SECONDS=1800 -e 
 
 ## 10. Check reports and stop the backend
 
-Each test writes `.json` and `.txt` summaries. Check for `Accounting: complete`, `Failed thresholds: none` and zero interrupted iterations. Let active sessions finish after each stage.
+Each run writes `.json` and `.txt` summaries. Check for `Accounting: complete`, `Failed thresholds: none` and zero interrupted iterations. Wait for the run to finish before starting the next test.
 
 ```powershell
 explorer.exe $reports
 ```
 
-For raw timestamped metrics, add `--out "json=$reports/<test-name>.samples.json"` to a k6 command. These files can be large.
+For raw metrics with timestamps, add `--out "json=$reports/<test-name>.samples.json"` to the k6 command. Raw files can be large.
 
-Press Ctrl+C in the backend terminal when finished. The benchmark database stays available for checking saved messages.
+Press Ctrl+C in the backend terminal when done. The database stays available to check saved messages.
 
-Previous measured results are in [RESULTS.md](RESULTS.md).
+See [RESULTS.md](RESULTS.md) for the recorded results.

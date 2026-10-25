@@ -15,3 +15,8 @@
 **/__pycache__/
 *.pyc
 *.pyo
+
+# Local editor settings, archives and private Spring profile.
+.vscode/
+*.zip
+backend/src/main/resources/application-local.properties

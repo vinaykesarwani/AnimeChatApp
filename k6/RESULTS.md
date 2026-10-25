@@ -1,18 +1,18 @@
 # Load test results
 
-Tested on 24-25 October 2026. All 10 scenario and room-layout combinations passed their configured thresholds.
+Ran on 24-25 October 2026. All 10 tests passed their thresholds.
 
 ## Setup
 
 - Windows 11 Pro, Intel Core Ultra 7 268V, 8 logical CPUs, about 32 GB RAM.
 - Spring Boot 4.0.2, Java 21.0.10, MySQL 8.0.45 and k6 1.7.1.
-- Backend, MySQL and k6 ran on the same machine. SQL logging was disabled.
-- Actual JWT login and SockJS/STOMP transport were used. Registration happened before measurement.
-- Each test started with empty rooms. Users sent 200-character messages once per second during 30-second sessions, followed by a five-second echo drain.
+- Backend, MySQL and k6 ran on the same machine. SQL logging was off.
+- Used the app's JWT login and SockJS/STOMP connection. Users were registered before measurement.
+- Each test started with empty rooms. Users sent 200-character messages once per second in 30-second sessions, then waited five seconds for echoes.
 
 ## Results
 
-Messages/sec and latency below are for the listed hold. Smoke latency covers the whole run. Total messages include ramps and session drain.
+Rates and latency cover the listed hold. Smoke latency covers the whole run. Message totals include ramps and drain time.
 
 | Test | Rooms | Peak users | Hold | Acked messages/sec | Echo p95 (ms) | Echo p99 (ms) | Total messages |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
@@ -27,28 +27,28 @@ Messages/sec and latency below are for the listed hold. Smoke latency covers the
 | Soak | 1 | 20 | 30 minutes | 16.26 | 42 | 78 | 30,052 |
 | Soak | 5 | 20 | 30 minutes | 16.40 | 51 | 75.85 | 30,337 |
 
-Throughput is the number of acknowledged messages sent during the hold divided by the hold duration. Users are concurrent virtual users, and active sessions can finish during ramp-down.
+Messages/sec = acknowledged original messages sent during the hold / hold seconds. Peak users are concurrent virtual users; running sessions can finish during ramp-down.
 
-Across all runs:
+Totals:
 
 - 154,851 messages sent and acknowledged, with 100% sender-echo success.
-- MySQL persisted-message and distinct-content counts matched the send counts in each run.
-- Zero HTTP failures, message errors, unexpected disconnects or unacknowledged sends.
-- Complete session/message accounting in every run. All 13 backend tests also passed before execution.
+- MySQL message and distinct-content counts matched each run's send count.
+- No HTTP failures, message errors, unexpected disconnects or unacknowledged sends.
+- All sessions finished and every send had an outcome. All 13 backend tests passed before these runs.
 
-Echo latency measures the sender receiving its own matching message after the backend saves and broadcasts it. Delivery time to every subscriber was not measured. These are local results, not a maximum-capacity measurement.
+Sender-echo latency covers sending a message to receiving its matching echo after save and broadcast. Delivery to every subscriber was not measured. These local results do not establish maximum capacity.
 
-## What we noticed
+## Observations
 
-During soak, history-fetch p95 increased between the 5-10 minute and 25-30 minute windows:
+History-fetch p95 rose during soak. Early = 5-10 minutes; late = 25-30 minutes:
 
 | Layout | Early history p95 | Late history p95 | Peak k6 memory |
 | --- | ---: | ---: | ---: |
 | One room | 197.39 ms | 565.50 ms | 4.37 GiB |
 | Five rooms | 68.60 ms | 140.91 ms | 0.92 GiB |
 
-The history endpoint returns all messages. MySQL used the room index and then sorted by creation time and ID. Pagination is worth testing next; these runs do not isolate the full cause of the slowdown.
+History returns all messages. MySQL used the room index and sorted by creation time and ID. The cause still needs profiling. Try pagination next.
 
-Steady tests and single-room stress ran on 24 October. The remaining tests ran on 25 October with raw metric export enabled. Application and load-test sources matched across both sessions. Raw export and other activity on the machine can affect results.
+Steady tests and single-room stress ran on 24 October; the rest on 25 October with raw metric export on. Both used the same application and load-test code. Export and other machine activity can affect results.
 
-Run the same workloads using [RUN_TESTS.md](RUN_TESTS.md).
+Commands: [RUN_TESTS.md](RUN_TESTS.md).

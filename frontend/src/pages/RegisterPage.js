@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import GoogleIcon from '../components/GoogleIcon';
 
 export default function RegisterPage() {
-  const { register } = useAuth();
+  const { register, loginWithOAuth } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -48,6 +49,24 @@ export default function RegisterPage() {
       <div className="auth-card">
         <h1 className="auth-title">JOIN<span> US</span></h1>
         <p className="auth-subtitle">Create your account to start discussing anime</p>
+
+        <button
+          type="button"
+          className="btn btn-secondary"
+          style={{ width: '100%', justifyContent: 'center', gap: 10, marginBottom: 20 }}
+          onClick={() => loginWithOAuth('google')}
+        >
+          <GoogleIcon /> Continue with Google
+        </button>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20,
+          color: 'var(--text-muted)', fontSize: '0.8rem',
+        }}>
+          <hr style={{ flex: 1, borderColor: 'var(--border)' }} />
+          OR
+          <hr style={{ flex: 1, borderColor: 'var(--border)' }} />
+        </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="form-group">
