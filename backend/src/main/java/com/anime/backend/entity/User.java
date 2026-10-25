@@ -22,4 +22,8 @@ public class User {
 
     @Enumerated(EnumType.STRING)
     private Role role;
+
+    @Column(name = "oauth_id", unique = true)
+    @JsonIgnore
+    private String oauthId;
 }

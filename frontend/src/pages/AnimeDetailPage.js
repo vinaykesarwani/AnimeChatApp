@@ -1,18 +1,16 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import api from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import api, { apiError } from '../services/api';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
 
 // Thresholds — mirror these in your docs if you ever tune them
 const THRESHOLD_BLOCK  = 0.90;  // > 0.90  → almost duplicate, block creation
 const THRESHOLD_WARN   = 0.75;  // 0.75–0.90 → similar, show warning + list
-// < 0.65 → allow immediately
+// Below THRESHOLD_WARN: allow immediately
 
 export default function AnimeDetailPage() {
   const { animeId } = useParams();
-  const { user } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -34,28 +32,55 @@ export default function AnimeDetailPage() {
 
   // Debounce timer ref
   const debounceRef = useRef(null);
+  const similarityVersion = useRef(0);
+  const [similarityError, setSimilarityError] = useState('');
+
+  const roomRequest = useRef(0);
+  const fetchRooms = useCallback(() => {
+    const request = ++roomRequest.current;
+    return api.get('/api/discussion-rooms')
+      .then(res => {
+        if (request !== roomRequest.current) return;
+        setRooms(res.data.filter(r => String(r.animeRoom?.id) === String(animeId)));
+      })
+      .catch(() => {
+        if (request === roomRequest.current) addToast('Failed to load discussion rooms', 'error');
+      })
+      .finally(() => { if (request === roomRequest.current) setLoading(false); });
+  }, [animeId, addToast]);
 
   useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setAnime(null);
+    setRooms([]);
+    setShowModal(false);
+    setShowDuplicateModal(false);
+    setNewTitle('');
+    setChecking(false);
+    setSimilarityError('');
+    setTitleError('');
+    setSimilarRooms([]);
+    setIsBlocked(false);
     api.get('/api/anime-rooms').then(res => {
+      if (!active) return;
       const found = res.data.find(a => String(a.id) === String(animeId));
       if (!found) { navigate('/'); return; }
       setAnime(found);
-    });
+    }).catch(() => { if (active) addToast('Failed to load anime information', 'error'); });
     fetchRooms();
-  }, [animeId]);
-
-  const fetchRooms = () => {
-    api.get('/api/discussion-rooms')
-      .then(res => {
-        const filtered = res.data.filter(r => String(r.animeRoom?.id) === String(animeId));
-        setRooms(filtered);
-      })
-      .catch(() => addToast('Failed to load discussion rooms', 'error'))
-      .finally(() => setLoading(false));
-  };
+    return () => {
+      active = false;
+      roomRequest.current += 1;
+      similarityVersion.current += 1;
+      clearTimeout(debounceRef.current);
+    };
+  }, [animeId, navigate, addToast, fetchRooms]);
 
   // ── Live similarity check (debounced 400 ms) ──
   const handleTitleChange = (value) => {
+    const request = ++similarityVersion.current;
+    setSimilarityError('');
     setNewTitle(value);
     setTitleError('');
     setSimilarRooms([]);
@@ -71,6 +96,7 @@ export default function AnimeDetailPage() {
           candidate: value.trim(),
           animeRoomId: Number(animeId),
         });
+        if (request !== similarityVersion.current) return;
         const results = res.data.results ?? [];  // [{ room, score }]
 
         // Find blocking room (highest score > BLOCK threshold)
@@ -92,9 +118,11 @@ const warnRooms = results
 }
         
       } catch {
-        // Silently degrade — similarity check failing shouldn't block the user
+        if (request === similarityVersion.current) {
+          setSimilarityError('Suggestions are unavailable. You can still create this room.');
+        }
       } finally {
-        setChecking(false);
+        if (request === similarityVersion.current) setChecking(false);
       }
     }, 400);
   };
@@ -111,7 +139,7 @@ const warnRooms = results
       closeBoth();
       fetchRooms();
     } catch (err) {
-      addToast(err.response?.data || 'Failed to create room', 'error');
+      addToast(apiError(err, 'Failed to create room'), 'error');
     } finally {
       setCreating(false);
     }
@@ -123,7 +151,7 @@ const warnRooms = results
     if (!newTitle.trim()) { setTitleError('Title is required'); return; }
 
     // If still checking, wait — shouldn't normally happen but guard it
-    if (checking) return;
+    if (checking || creating) return;
 
     // Block: exact/near-duplicate
     if (isBlocked) {
@@ -143,6 +171,9 @@ const warnRooms = results
   };
 
   const closeBoth = () => {
+    similarityVersion.current += 1;
+    setChecking(false);
+    setSimilarityError('');
     setShowModal(false);
     setShowDuplicateModal(false);
     setNewTitle('');
@@ -190,7 +221,7 @@ const warnRooms = results
           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', paddingBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
             <div>
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--accent)', letterSpacing: '2px', marginBottom: '6px' }}>
-                // ANIME COMMUNITY
+                {'// ANIME COMMUNITY'}
               </div>
               <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 4vw, 3rem)', letterSpacing: '3px', lineHeight: 1 }}>
                 {anime?.name || <span style={{ opacity: 0.4 }}>Loading...</span>}
@@ -293,6 +324,7 @@ const warnRooms = results
                 className="form-input"
                 style={{ paddingRight: checking ? '2.5rem' : undefined }}
                 placeholder="e.g. Best moments, Episode 1 reaction..."
+                maxLength={255}
                 value={newTitle}
                 onChange={e => handleTitleChange(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCreate()}
@@ -307,6 +339,7 @@ const warnRooms = results
               )}
             </div>
 
+            {similarityError && <p role="status">{similarityError}</p>}
             {titleError && <span className="form-error">{titleError}</span>}
 
             {/* Inline live feedback — blocked */}
@@ -322,74 +355,28 @@ const warnRooms = results
               </div>
             )}
 
-            {/* Inline live feedback — similar (warn) */}
-            {!checking && !isBlocked && similarRooms.length > 0 && (
-              <div style={{
-                marginTop: '0.5rem', padding: '0.6rem 0.8rem',
-                background: 'rgba(255,214,10,0.07)', border: '1px solid rgba(255,214,10,0.25)',
-                borderRadius: 'var(--radius-sm)', fontSize: '0.8rem', color: 'var(--gold)',
-                display: 'flex', alignItems: 'center', gap: '0.5rem',
-              }}>
-                <span>⚠️</span>
-                <span>{similarRooms.length} similar room{similarRooms.length > 1 ? 's' : ''} found — review before creating.</span>
+            {/* Similarity suggestions link to the existing rooms. */}
+            {!checking && similarRooms.length > 0 && (
+              <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.5rem' }}>
+                {!isBlocked && (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--gold)' }}>
+                    {similarRooms.length} similar room{similarRooms.length > 1 ? 's' : ''} found — review before creating.
+                  </p>
+                )}
+                {similarRooms.map(({ room, score }) => (
+                  <button
+                    key={room.id}
+                    className="btn btn-secondary"
+                    onClick={() => { closeBoth(); navigate(`/chat/${room.id}`); }}
+                  >
+                    {room.title} · {Math.round(score * 100)}% · JOIN →
+                  </button>
+                ))}
               </div>
             )}
 
-            {/* Inline similar rooms preview */}
-{!checking && similarRooms.length > 0 && (
-  <div style={{
-    marginTop: '0.6rem',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '0.4rem'
-  }}>
-    {similarRooms.slice(0, 3).map(({ room, score }) => (
-      <div
-        key={room.id}
-        onClick={() => {
-          closeBoth();
-          navigate(`/chat/${room.id}`);
-        }}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.6rem',
-          padding: '0.5rem 0.7rem',
-          background: 'var(--bg-input)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-sm)',
-          cursor: 'pointer'
-        }}
-      >
-        <span>{getRoomEmoji(room.title)}</span>
-
-        <div style={{ flex: 1 }}>
-          <div style={{
-            fontSize: '0.8rem',
-            fontWeight: 500,
-            color: 'var(--text-primary)'
-          }}>
-            {room.title}
-          </div>
-
-          <div style={{
-            fontSize: '0.7rem',
-            color: 'var(--text-muted)'
-          }}>
-            {/* {Math.round(score * 100)}% match */}
-          </div>
-        </div>
-
-        <span style={{ fontSize: '0.7rem', color: 'var(--accent)' }}>
-          JOIN →
-        </span>
-      </div>
-    ))}
-  </div>
-)}
-
             {/* Hint */}
-            {!checking && !isBlocked && similarRooms.length === 0 && newTitle.trim() && (
+            {!checking && !similarityError && !isBlocked && similarRooms.length === 0 && newTitle.trim() && (
               <div style={{ marginTop: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
                 ✓ No similar rooms found
               </div>
@@ -432,7 +419,7 @@ const warnRooms = results
           {/* Similar rooms list */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', letterSpacing: '1px' }}>
-              // SIMILAR ROOMS ({similarRooms.length})
+              {'// SIMILAR ROOMS'} ({similarRooms.length})
             </p>
 
             {similarRooms.map(({ room, score }) => {

@@ -1,0 +1,17 @@
+# Local settings and credentials
+.env
+.env.*
+!.env.example
+
+# Installed dependencies and virtual environments
+**/node_modules/
+**/venv/
+**/.venv/
+
+# Generated application output and Python caches
+**/target/
+**/build/
+**/dist/
+**/__pycache__/
+*.pyc
+*.pyo

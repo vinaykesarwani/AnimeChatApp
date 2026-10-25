@@ -1,561 +1,302 @@
+import http from 'k6/http';
 import ws from 'k6/ws';
-import { check } from 'k6';
-import { Counter, Gauge, Rate, Trend } from 'k6/metrics';
+import { check, fail, sleep } from 'k6';
+import execution from 'k6/execution';
+import { Counter, Rate, Trend } from 'k6/metrics';
+import { readConfig, publicConfig } from './config.js';
+import { frame, sockjsUrl, createDecoder } from './protocol.js';
 
-// ── Config ─────────────────────────────────────────
-const BASE_URL     = __ENV.BASE_URL     || 'http://localhost:8080';
-const ROOM_ID      = __ENV.ROOM_ID      || '1';
-const PREFIX       = __ENV.PREFIX       || 'testuser';
-const PASSWORD     = __ENV.PASSWORD     || 'Password123';
-const MSG_INTERVAL = parseInt(__ENV.MSG_INTERVAL || '1000');
-
-// ── Scenario ───────────────────────────────────────
+const config = readConfig(__ENV);
 export const options = {
   scenarios: {
-    websocket_load: {
+    chat: {
       executor: 'ramping-vus',
-      startVUs: 0,
-      stages: [
-        { duration: '30s', target: 150 },
-        { duration: '60s', target: 150 },
-        { duration: '20s', target: 0   },
-      ],
-      gracefulRampDown: '10s',
+      startVUs: config.profile === 'smoke' ? config.peak : 0,
+      stages: config.stages,
+      gracefulRampDown: `${config.graceMs}ms`,
+      gracefulStop: `${config.graceMs}ms`,
     },
   },
+  summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
+  systemTags: ['status', 'method', 'name', 'scenario', 'check', 'error', 'error_code', 'expected_response'],
   thresholds: {
-    'ws_msg_latency':          ['p(95)<500'],   // round-trip
-    'ws_fanout_latency':       ['p(95)<500'],   // fanout
-    'ws_msg_drop_rate':        ['rate<0.05'],
-    'ws_connect_success':      ['rate>0.95'],
+    checks: ['rate==1'],
+    login_success: ['rate==1'],
+    history_success: ['rate==1'],
+    chat_connect_success: ['rate>0.99'],
+    chat_connect_ms: [`p(95)<${config.connectP95}`],
+    history_ms: [`p(95)<${config.historyP95}`],
+    chat_echo_ms: [`p(95)<${config.echoP95}`, `p(99)<${config.echoP99}`],
+    chat_echo_success: ['rate>0.99'],
+    chat_sent: ['count>0'],
+    chat_acked: ['count>0'],
+    chat_errors: ['count==0'],
+    chat_early_closes: ['count==0'],
+    http_req_failed: ['rate==0'],
   },
 };
 
-// ── Metrics ────────────────────────────────────────
-const msgLatency     = new Trend('ws_msg_latency',     true);  // round-trip (sender only)
-const fanoutLatency  = new Trend('ws_fanout_latency',  true);  // fanout (every subscriber)
-const timeToConnect  = new Trend('ws_time_to_connect', true);  // open → STOMP CONNECTED
-const msgSent        = new Counter('ws_msg_sent');
-const msgReceived    = new Counter('ws_msg_received');
-const msgDropped     = new Counter('ws_msg_dropped');
-const msgDropRate    = new Rate('ws_msg_drop_rate');
-const connectSuccess = new Rate('ws_connect_success');
-
-// ── Helpers ────────────────────────────────────────
-function randomStr(len = 8) {
-  const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let s = '';
-  for (let i = 0; i < len; i++) s += c[Math.floor(Math.random() * c.length)];
-  return s;
+// A fast low-load phase must not hide a slow held load level in the aggregate.
+const heldStages = { smoke: [], steady: [2], stress: [2, 4, 6], spike: [3, 5], soak: [2] };
+for (const stage of heldStages[config.profile]) {
+  const selector = `{phase:stage_${stage}}`;
+  options.thresholds[`chat_echo_ms${selector}`] = [`p(95)<${config.echoP95}`, `p(99)<${config.echoP99}`];
+  options.thresholds[`chat_echo_success${selector}`] = ['rate>0.99'];
+  options.thresholds[`chat_acked${selector}`] = ['count>0'];
 }
 
-function wsUrl(base) {
-  return base.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/ws';
+const loginSuccess = new Rate('login_success');
+const loginMs = new Trend('login_ms', true);
+const historySuccess = new Rate('history_success');
+const historyMs = new Trend('history_ms', true);
+const connectSuccess = new Rate('chat_connect_success');
+const connectMs = new Trend('chat_connect_ms', true);
+const sent = new Counter('chat_sent');
+const acked = new Counter('chat_acked');
+const echoMs = new Trend('chat_echo_ms', true);
+const echoSuccess = new Rate('chat_echo_success');
+const unacknowledged = new Counter('chat_unacknowledged');
+const received = new Counter('chat_received');
+const errors = new Counter('chat_errors');
+const earlyCloses = new Counter('chat_early_closes');
+const sessionsStarted = new Counter('chat_sessions_started');
+const sessionsFinished = new Counter('chat_sessions_finished');
+let token; // Each VU has its own module state and logs in once, like the browser.
+
+function json(response) {
+  try { return response.json(); } catch { return null; }
 }
 
-function stompFrame(command, headers = {}, body = '') {
-  let f = command + '\n';
-  for (const [k, v] of Object.entries(headers)) {
-    f += `${k}:${v}\n`;
+function phase() {
+  const elapsed = (Date.now() - execution.scenario.startTime) / 1000;
+  let end = 0;
+  for (let index = 0; index < config.stages.length; index++) {
+    end += Number(config.stages[index].duration.slice(0, -1));
+    if (elapsed < end) return `stage_${index + 1}`;
   }
-  f += '\n' + body + String.fromCharCode(0);
-  return f;
+  return 'drain';
 }
 
-function parseStompFrame(raw) {
-  const clean = raw.replace(/\0+$/, '');
-  const sep   = clean.indexOf('\n\n');
-  const headerPart = sep >= 0 ? clean.slice(0, sep) : clean;
-  const body       = sep >= 0 ? clean.slice(sep + 2) : '';
-  const lines      = headerPart.split('\n');
-  const command    = lines[0].trim();
-  const headers    = {};
-  lines.slice(1).forEach(l => {
-    const i = l.indexOf(':');
-    if (i > 0) headers[l.slice(0, i)] = l.slice(i + 1);
+function tags(room, extra = {}) {
+  return { profile: config.profile, topology: config.topology, room, phase: phase(), ...extra };
+}
+
+export function setup() {
+  // Check fixtures before starting load. Registration belongs in seed.js.
+  const response = http.post(`${config.baseUrl}/api/auth/login`, JSON.stringify({
+    username: `${config.userPrefix}1`, password: config.password,
+  }), { headers: { 'Content-Type': 'application/json' }, timeout: '10s', tags: { name: 'preflight_login' } });
+  const auth = json(response);
+  if (response.status !== 200 || !auth?.token || auth.user?.username !== `${config.userPrefix}1`) {
+    fail('Preflight login failed. Run seed.js with the same USER_PREFIX and PASSWORD.');
+  }
+  const roomsResponse = http.get(`${config.baseUrl}/api/discussion-rooms`, {
+    headers: { Authorization: `Bearer ${auth.token}` }, timeout: '10s', tags: { name: 'preflight_rooms' },
   });
-  return { command, headers, body };
+  const rooms = json(roomsResponse);
+  if (roomsResponse.status !== 200 || !Array.isArray(rooms)
+      || config.rooms.some(id => !rooms.some(room => String(room.id) === id))) {
+    fail('Preflight failed: one or more ROOM_IDS do not exist or cannot be read.');
+  }
+  return { runId: config.runId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}` };
 }
 
-// ── Main VU ────────────────────────────────────────
-export default function () {
-  const username = `${PREFIX}${__VU}`;
-  const url      = wsUrl(BASE_URL);
-  const pending  = {};
-  let stompConnected = false;
-  let msgCount       = 0;
-  let connectStart   = 0;
+export default function (data) {
+  const room = config.rooms[(__VU - 1) % config.rooms.length];
+  const sessionTags = tags(room);
+  const username = `${config.userPrefix}${__VU}`;
+  errors.add(0, sessionTags);
+  earlyCloses.add(0, sessionTags);
+  if (!token) {
+    const response = http.post(`${config.baseUrl}/api/auth/login`, JSON.stringify({
+      username, password: config.password,
+    }), { headers: { 'Content-Type': 'application/json' }, timeout: '10s', tags: { ...sessionTags, name: 'login' } });
+    const auth = json(response);
+    const ok = response.status === 200 && typeof auth?.token === 'string' && auth.user?.username === username;
+    loginSuccess.add(ok, sessionTags);
+    loginMs.add(response.timings.duration, sessionTags);
+    if (!ok) { sleep(1); return; }
+    token = auth.token;
+  }
 
-  const res = ws.connect(url, {}, function (socket) {
+  // The chat page loads history when it joins/rejoins a room.
+  const history = http.get(`${config.baseUrl}/api/messages/discussion/${room}`, {
+    headers: { Authorization: `Bearer ${token}` }, timeout: '10s',
+    tags: { ...sessionTags, name: 'room_history' },
+  });
+  const historyOk = history.status === 200 && Array.isArray(json(history));
+  historySuccess.add(historyOk, sessionTags);
+  historyMs.add(history.timings.duration, sessionTags);
+  if (!historyOk) { sleep(1); return; }
 
-    socket.on('open', () => {
-      connectStart = Date.now();  // ← start connect timer
-      socket.send(
-        stompFrame('CONNECT', {
-          'accept-version': '1.1,1.0',
-          'heart-beat':     '10000,10000',
-          login:    username,
-          passcode: PASSWORD,
-        })
-      );
-    });
+  const pending = new Map();
+  const decode = createDecoder();
+  let connected = false;
+  let plannedClose = false;
+  let socketError = false;
+  let sequence = 0;
+  let sendUntil = 0;
+  const openedAt = Date.now();
+  const sessionId = `${data.runId}-${__VU}-${__ITER}`;
 
-    socket.on('message', (data) => {
-      const frame = parseStompFrame(data);
+  function settle(id, success) {
+    const message = pending.get(id);
+    if (!message) return;
+    echoSuccess.add(success, message.tags);
+    if (success) {
+      acked.add(1, message.tags);
+      echoMs.add(Date.now() - message.time, message.tags);
+    } else {
+      unacknowledged.add(1, message.tags);
+    }
+    pending.delete(id);
+  }
 
-      // ── CONNECTED ──────────────────────────────
-      if (frame.command === 'CONNECTED') {
-        stompConnected = true;
-        connectSuccess.add(1);
-        timeToConnect.add(Date.now() - connectStart);  // ← record connect time
-
-        socket.send(
-          stompFrame('SUBSCRIBE', {
-            id:          `sub-${randomStr(4)}`,
-            destination: `/topic/chat/${ROOM_ID}`,
-          })
-        );
-
-        // Send messages
-        socket.setInterval(() => {
-          if (!stompConnected) return;
-
-          const tempId  = `vu${__VU}-${Date.now()}-${randomStr(4)}`;
-          const payload = JSON.stringify({
-            content: `msg #${++msgCount}`,
-            tempId,
-          });
-
-          socket.send(
-            stompFrame('SEND', {
-              destination:      `/app/chat.send/${ROOM_ID}`,
-              'content-type':   'application/json',
-              'content-length': payload.length,
-            }, payload)
-          );
-
-          pending[tempId] = Date.now();
-          msgSent.add(1);
-
-          // Drop timeout
-          socket.setTimeout(() => {
-            if (pending[tempId]) {
-              delete pending[tempId];
-              msgDropped.add(1);
-              msgDropRate.add(1);
-            }
-          }, 5000);
-
-        }, MSG_INTERVAL);
-
-        // Heartbeat
-        socket.setInterval(() => {
-          if (stompConnected) socket.send('\n');
-        }, 10000);
+  sessionsStarted.add(1, sessionTags);
+  try {
+    const response = ws.connect(sockjsUrl(config.baseUrl, sessionId), {
+      headers: { Origin: config.origin }, tags: { ...sessionTags, name: 'sockjs_websocket' },
+    }, socket => {
+      function send(command, headers, body) {
+        socket.send(JSON.stringify([frame(command, headers, body)]));
       }
-
-      // ── MESSAGE ────────────────────────────────
-      if (frame.command === 'MESSAGE') {
-        try {
-          const event = JSON.parse(frame.body);
-
-          if (event.type === 'CREATE') {
-            msgReceived.add(1);
-            const now = Date.now();
-            const msg = event.message;
-
-            // ── Fanout latency (every subscriber) ──
-            // Time from server broadcast → this client received it
-            if (event.sentAt) {
-              fanoutLatency.add(now - event.sentAt);
-            }
-
-            // ── Round-trip latency (sender only) ───
-            // Time from sender sent → sender received echo
-            if (msg?.tempId && pending[msg.tempId]) {
-              msgLatency.add(now - pending[msg.tempId]);
-              msgDropRate.add(0);
-              delete pending[msg.tempId];
-            }
-          }
-        } catch {}
-      }
-
-      // ── ERROR ──────────────────────────────────
-      if (frame.command === 'ERROR') {
-        connectSuccess.add(0);
-        stompConnected = false;
-        console.error(`STOMP ERROR | message: ${frame.headers['message']} | body: ${frame.body}`);
+      function reject(kind) {
+        errors.add(1, tags(room, { kind }));
         socket.close();
       }
+      socket.on('message', packet => {
+        try {
+          for (const event of decode(String(packet))) {
+            if (event.command === 'SOCKJS_OPEN') {
+              send('CONNECT', {
+                'accept-version': '1.2', 'heart-beat': '10000,10000',
+                host: 'localhost', login: '__jwt__', passcode: token,
+              });
+            } else if (event.command === 'CONNECTED') {
+              if (connected) throw new Error('Duplicate CONNECTED frame');
+              connected = true;
+              connectMs.add(Date.now() - openedAt, sessionTags);
+              send('SUBSCRIBE', { id: 'chat', destination: `/topic/chat/${room}` });
+              send('SUBSCRIBE', { id: 'errors', destination: '/user/queue/errors' });
+              // Ordered inbound processing preserves SUBSCRIBE before SEND.
+              // The simple broker has no subscription receipt support.
+              sendUntil = Date.now() + config.sessionMs;
+              socket.setInterval(() => {
+                if (Date.now() >= sendUntil) return;
+                const id = `${sessionId}-${++sequence}`;
+                const messageTags = tags(room);
+                const content = `[load:${data.runId}] ${id}`.padEnd(200, '.');
+                pending.set(id, { time: Date.now(), tags: messageTags, content });
+                sent.add(1, messageTags);
+                try {
+                  send('SEND', { destination: `/app/chat.send/${room}`, 'content-type': 'application/json' },
+                    JSON.stringify({ content, replyToMessageId: null, tempId: id }));
+                } catch {
+                  settle(id, false);
+                  reject('send');
+                }
+              }, config.intervalMs);
+              socket.setInterval(() => {
+                const now = Date.now();
+                for (const [id, message] of pending) {
+                  if (now - message.time >= config.ackTimeoutMs) settle(id, false);
+                }
+              }, Math.min(250, config.ackTimeoutMs));
+              socket.setInterval(() => socket.send(JSON.stringify(['\n'])), 10000);
+              socket.setTimeout(() => {
+                plannedClose = true;
+                send('DISCONNECT');
+                socket.close();
+              }, config.sessionMs + config.ackTimeoutMs + 250);
+            } else if (event.command === 'MESSAGE') {
+              if (event.headers.subscription === 'errors') { reject('application'); return; }
+              const update = JSON.parse(event.body);
+              const message = update.message;
+              if (update.type !== 'CREATE' || !message?.tempId?.startsWith(`${data.runId}-`)) continue;
+              if (String(message.discussionRoom?.id) !== room || !message.id) {
+                throw new Error('Unexpected room or unsaved message');
+              }
+              received.add(1, tags(room)); // Subscriber observations, not unique sends.
+              const own = pending.get(message.tempId);
+              if (own) {
+                if (message.content !== own.content || message.sender?.username !== username) {
+                  reject('echo_mismatch'); return;
+                }
+                settle(message.tempId, Date.now() - own.time < config.ackTimeoutMs);
+              }
+            } else if (event.command === 'ERROR') {
+              reject('stomp'); return;
+            } else if (event.command === 'SOCKJS_CLOSE') {
+              socket.close(); return;
+            }
+          }
+        } catch {
+          reject('protocol');
+        }
+      });
+      socket.on('error', () => {
+        socketError = true;
+        errors.add(1, tags(room, { kind: 'transport' }));
+        socket.setTimeout(() => socket.close(), 1);
+      });
+      socket.on('close', () => {
+        if (!plannedClose) earlyCloses.add(1, tags(room));
+      });
+      socket.setTimeout(() => {
+        if (!connected) reject('connect_timeout');
+      }, config.connectTimeoutMs);
     });
-
-    socket.on('error', (e) => {
-      connectSuccess.add(0);
-      console.error(`WS error VU${__VU}:`, e);
-    });
-
-    socket.on('close', () => {
-      if (stompConnected) stompConnected = false;
-    });
-
-    socket.setTimeout(() => socket.close(), 130000);
-  });
-
-  check(res, { 'ws 101': (r) => r && r.status === 101 });
-}
-
-// ── Summary ────────────────────────────────────────
-export function handleSummary(data) {
-  const m = data.metrics;
-
-  function val(name, stat) {
-    return m[name]?.values?.[stat] ?? 0;
+    check(response, { 'SockJS WebSocket upgraded': result => result?.status === 101 }, sessionTags);
+  } catch {
+    socketError = true;
+    errors.add(1, tags(room, { kind: 'transport' }));
+  } finally {
+    // A closed socket cannot acknowledge pending sends. Never discard this tail.
+    for (const id of pending.keys()) settle(id, false);
+    connectSuccess.add(connected, sessionTags); // Exactly one outcome per attempt.
+    sessionsFinished.add(1, sessionTags);
   }
-
-  const sent       = val('ws_msg_sent',          'count');
-  const received   = val('ws_msg_received',       'count');
-  const dropped    = val('ws_msg_dropped',        'count');
-  const dropPct    = sent > 0 ? ((dropped / sent) * 100).toFixed(2) : '0.00';
-
-  // Round-trip (sender only)
-  const rtAvg      = val('ws_msg_latency',        'avg').toFixed(0);
-  const rtP95      = val('ws_msg_latency',        'p(95)').toFixed(0);
-  const rtP99      = val('ws_msg_latency',        'p(99)').toFixed(0);
-  const rtMax      = val('ws_msg_latency',        'max').toFixed(0);
-
-  // Fanout (every subscriber)
-  const foAvg      = val('ws_fanout_latency',     'avg').toFixed(0);
-  const foP95      = val('ws_fanout_latency',     'p(95)').toFixed(0);
-  const foP99      = val('ws_fanout_latency',     'p(99)').toFixed(0);
-  const foMax      = val('ws_fanout_latency',     'max').toFixed(0);
-
-  // Connect time
-  const connAvg    = val('ws_time_to_connect',    'avg').toFixed(0);
-  const connP95    = val('ws_time_to_connect',    'p(95)').toFixed(0);
-  const connMax    = val('ws_time_to_connect',    'max').toFixed(0);
-
-  const connRate   = (val('ws_connect_success',   'rate') * 100).toFixed(1);
-
-  const lines = [
-    '',
-    '╔══════════════════════════════════════════════════╗',
-    '║            k6 WebSocket Load Test Report         ║',
-    '╚══════════════════════════════════════════════════╝',
-    `  Backend        : ${BASE_URL}`,
-    `  Room           : ${ROOM_ID}`,
-    `  Msg interval   : ${MSG_INTERVAL}ms / VU`,
-    '',
-    '── Connections ─────────────────────────────────────',
-    `  Success rate   : ${connRate}%`,
-    `  Time to connect: avg=${connAvg}ms  p95=${connP95}ms  max=${connMax}ms`,
-    '',
-    '── Throughput ──────────────────────────────────────',
-    `  Sent           : ${sent}`,
-    `  Received       : ${received}`,
-    `  Dropped        : ${dropped}  (${dropPct}%)`,
-    '',
-    '── Round-trip Latency (sender only) ────────────────',
-    `  avg            : ${rtAvg}ms`,
-    `  p95            : ${rtP95}ms`,
-    `  p99            : ${rtP99}ms`,
-    `  max            : ${rtMax}ms`,
-    '',
-    '── Fanout Latency (every subscriber) ───────────────',
-    `  avg            : ${foAvg}ms`,
-    `  p95            : ${foP95}ms`,
-    `  p99            : ${foP99}ms`,
-    `  max            : ${foMax}ms`,
-    '',
-    '── Thresholds ──────────────────────────────────────',
-  ];
-
-  ['ws_msg_latency', 'ws_fanout_latency', 'ws_msg_drop_rate', 'ws_connect_success'].forEach(name => {
-    const t = data.thresholds?.[name];
-    if (t) lines.push(`  ${t.ok ? '✓ PASS' : '✗ FAIL'}  ${name}`);
-  });
-
-  lines.push('');
-  console.log(lines.join('\n'));
-  return {};
+  if (!connected || socketError) sleep(1);
 }
 
-// import ws from 'k6/ws';
-// import { check } from 'k6';
-// import { Counter, Gauge, Rate, Trend } from 'k6/metrics';
-
-// // ── Config ─────────────────────────────────────────
-// const BASE_URL     = __ENV.BASE_URL     || 'http://localhost:8080';
-// // Comma-separated list of room IDs, e.g. ROOM_IDS=1,2,3
-// // Falls back to a single room "1" if not provided.
-// const ROOM_IDS = ['1', '2', '3', '4', '5'];
-// const PREFIX       = __ENV.PREFIX       || 'testuser';
-// const PASSWORD     = __ENV.PASSWORD     || 'Password123';
-// const MSG_INTERVAL = parseInt(__ENV.MSG_INTERVAL || '1000');
-
-// // ── Scenario ───────────────────────────────────────
-// export const options = {
-//   scenarios: {
-//     websocket_load: {
-//       executor: 'ramping-vus',
-//       startVUs: 0,
-//       stages: [
-//         { duration: '30s', target: 750 },
-//         { duration: '60s', target:  750},
-//         { duration: '20s', target: 0  },
-//       ],
-//       gracefulRampDown: '10s',
-//     },
-//   },
-//   thresholds: {
-//     'ws_msg_latency':          ['p(95)<500'],
-//     'ws_fanout_latency':       ['p(95)<500'],
-//     'ws_msg_drop_rate':        ['rate<0.05'],
-//     'ws_connect_success':      ['rate>0.95'],
-//   },
-// };
-
-// // ── Metrics ────────────────────────────────────────
-// const msgLatency     = new Trend('ws_msg_latency',     true);
-// const fanoutLatency  = new Trend('ws_fanout_latency',  true);
-// const timeToConnect  = new Trend('ws_time_to_connect', true);
-// const msgSent        = new Counter('ws_msg_sent');
-// const msgReceived    = new Counter('ws_msg_received');
-// const msgDropped     = new Counter('ws_msg_dropped');
-// const msgDropRate    = new Rate('ws_msg_drop_rate');
-// const connectSuccess = new Rate('ws_connect_success');
-
-// // ── Helpers ────────────────────────────────────────
-// function randomStr(len = 8) {
-//   const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
-//   let s = '';
-//   for (let i = 0; i < len; i++) s += c[Math.floor(Math.random() * c.length)];
-//   return s;
-// }
-
-// function wsUrl(base) {
-//   return base.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/ws';
-// }
-
-// function stompFrame(command, headers = {}, body = '') {
-//   let f = command + '\n';
-//   for (const [k, v] of Object.entries(headers)) {
-//     f += `${k}:${v}\n`;
-//   }
-//   f += '\n' + body + String.fromCharCode(0);
-//   return f;
-// }
-
-// function parseStompFrame(raw) {
-//   const clean = raw.replace(/\0+$/, '');
-//   const sep   = clean.indexOf('\n\n');
-//   const headerPart = sep >= 0 ? clean.slice(0, sep) : clean;
-//   const body       = sep >= 0 ? clean.slice(sep + 2) : '';
-//   const lines      = headerPart.split('\n');
-//   const command    = lines[0].trim();
-//   const headers    = {};
-//   lines.slice(1).forEach(l => {
-//     const i = l.indexOf(':');
-//     if (i > 0) headers[l.slice(0, i)] = l.slice(i + 1);
-//   });
-//   return { command, headers, body };
-// }
-
-// // ── Main VU ────────────────────────────────────────
-// export default function () {
-//   // Each VU is assigned a room round-robin based on its VU number.
-//   // VU 1 → ROOM_IDS[0], VU 2 → ROOM_IDS[1], …, VU N+1 → ROOM_IDS[0], etc.
-//   const roomId   = ROOM_IDS[(__VU - 1) % ROOM_IDS.length];
-//   const username = `${PREFIX}${__VU}`;
-//   const url      = wsUrl(BASE_URL);
-//   const pending  = {};
-//   let stompConnected = false;
-//   let msgCount       = 0;
-//   let connectStart   = 0;
-
-//   const res = ws.connect(url, {}, function (socket) {
-
-//     socket.on('open', () => {
-//       connectStart = Date.now();
-//       socket.send(
-//         stompFrame('CONNECT', {
-//           'accept-version': '1.1,1.0',
-//           'heart-beat':     '10000,10000',
-//           login:    username,
-//           passcode: PASSWORD,
-//         })
-//       );
-//     });
-
-//     socket.on('message', (data) => {
-//       const frame = parseStompFrame(data);
-
-//       // ── CONNECTED ──────────────────────────────
-//       if (frame.command === 'CONNECTED') {
-//         stompConnected = true;
-//         connectSuccess.add(1);
-//         timeToConnect.add(Date.now() - connectStart);
-
-//         socket.send(
-//           stompFrame('SUBSCRIBE', {
-//             id:          `sub-${randomStr(4)}`,
-//             destination: `/topic/chat/${roomId}`,
-//           })
-//         );
-
-//         // Send messages
-//         socket.setInterval(() => {
-//           if (!stompConnected) return;
-
-//           const tempId  = `vu${__VU}-${Date.now()}-${randomStr(4)}`;
-//           const payload = JSON.stringify({
-//             content: `msg #${++msgCount}`,
-//             tempId,
-//           });
-
-//           socket.send(
-//             stompFrame('SEND', {
-//               destination:      `/app/chat.send/${roomId}`,
-//               'content-type':   'application/json',
-//               'content-length': payload.length,
-//             }, payload)
-//           );
-
-//           pending[tempId] = Date.now();
-//           msgSent.add(1);
-
-//           // Drop timeout
-//           socket.setTimeout(() => {
-//             if (pending[tempId]) {
-//               delete pending[tempId];
-//               msgDropped.add(1);
-//               msgDropRate.add(1);
-//             }
-//           }, 5000);
-
-//         }, MSG_INTERVAL);
-
-//         // Heartbeat
-//         socket.setInterval(() => {
-//           if (stompConnected) socket.send('\n');
-//         }, 10000);
-//       }
-
-//       // ── MESSAGE ────────────────────────────────
-//       if (frame.command === 'MESSAGE') {
-//         try {
-//           const event = JSON.parse(frame.body);
-
-//           if (event.type === 'CREATE') {
-//             msgReceived.add(1);
-//             const now = Date.now();
-//             const msg = event.message;
-
-//             if (event.sentAt) {
-//               fanoutLatency.add(now - event.sentAt);
-//             }
-
-//             if (msg?.tempId && pending[msg.tempId]) {
-//               msgLatency.add(now - pending[msg.tempId]);
-//               msgDropRate.add(0);
-//               delete pending[msg.tempId];
-//             }
-//           }
-//         } catch {}
-//       }
-
-//       // ── ERROR ──────────────────────────────────
-//       if (frame.command === 'ERROR') {
-//         connectSuccess.add(0);
-//         stompConnected = false;
-//         console.error(`STOMP ERROR | VU${__VU} room=${roomId} | message: ${frame.headers['message']} | body: ${frame.body}`);
-//         socket.close();
-//       }
-//     });
-
-//     socket.on('error', (e) => {
-//       connectSuccess.add(0);
-//       console.error(`WS error VU${__VU} room=${roomId}:`, e);
-//     });
-
-//     socket.on('close', () => {
-//       if (stompConnected) stompConnected = false;
-//     });
-
-//     socket.setTimeout(() => socket.close(), 130000);
-//   });
-
-//   check(res, { 'ws 101': (r) => r && r.status === 101 });
-// }
-
-// // ── Summary ────────────────────────────────────────
-// export function handleSummary(data) {
-//   const m = data.metrics;
-
-//   function val(name, stat) {
-//     return m[name]?.values?.[stat] ?? 0;
-//   }
-
-//   const sent       = val('ws_msg_sent',          'count');
-//   const received   = val('ws_msg_received',       'count');
-//   const dropped    = val('ws_msg_dropped',        'count');
-//   const dropPct    = sent > 0 ? ((dropped / sent) * 100).toFixed(2) : '0.00';
-
-//   const rtAvg      = val('ws_msg_latency',        'avg').toFixed(0);
-//   const rtP95      = val('ws_msg_latency',        'p(95)').toFixed(0);
-//   const rtP99      = val('ws_msg_latency',        'p(99)').toFixed(0);
-//   const rtMax      = val('ws_msg_latency',        'max').toFixed(0);
-
-//   const foAvg      = val('ws_fanout_latency',     'avg').toFixed(0);
-//   const foP95      = val('ws_fanout_latency',     'p(95)').toFixed(0);
-//   const foP99      = val('ws_fanout_latency',     'p(99)').toFixed(0);
-//   const foMax      = val('ws_fanout_latency',     'max').toFixed(0);
-
-//   const connAvg    = val('ws_time_to_connect',    'avg').toFixed(0);
-//   const connP95    = val('ws_time_to_connect',    'p(95)').toFixed(0);
-//   const connMax    = val('ws_time_to_connect',    'max').toFixed(0);
-
-//   const connRate   = (val('ws_connect_success',   'rate') * 100).toFixed(1);
-
-//   const lines = [
-//     '',
-//     '╔══════════════════════════════════════════════════╗',
-//     '║            k6 WebSocket Load Test Report         ║',
-//     '╚══════════════════════════════════════════════════╝',
-//     `  Backend        : ${BASE_URL}`,
-//     `  Rooms          : ${ROOM_IDS.join(', ')}`,
-//     `  Msg interval   : ${MSG_INTERVAL}ms / VU`,
-//     '',
-//     '── Connections ─────────────────────────────────────',
-//     `  Success rate   : ${connRate}%`,
-//     `  Time to connect: avg=${connAvg}ms  p95=${connP95}ms  max=${connMax}ms`,
-//     '',
-//     '── Throughput ──────────────────────────────────────',
-//     `  Sent           : ${sent}`,
-//     `  Received       : ${received}`,
-//     `  Dropped        : ${dropped}  (${dropPct}%)`,
-//     '',
-//     '── Round-trip Latency (sender only) ────────────────',
-//     `  avg            : ${rtAvg}ms`,
-//     `  p95            : ${rtP95}ms`,
-//     `  p99            : ${rtP99}ms`,
-//     `  max            : ${rtMax}ms`,
-//     '',
-//     '── Fanout Latency (every subscriber) ───────────────',
-//     `  avg            : ${foAvg}ms`,
-//     `  p95            : ${foP95}ms`,
-//     `  p99            : ${foP99}ms`,
-//     `  max            : ${foMax}ms`,
-//     '',
-//     '── Thresholds ──────────────────────────────────────',
-//   ];
-
-//   ['ws_msg_latency', 'ws_fanout_latency', 'ws_msg_drop_rate', 'ws_connect_success'].forEach(name => {
-//     const t = data.thresholds?.[name];
-//     if (t) lines.push(`  ${t.ok ? '✓ PASS' : '✗ FAIL'}  ${name}`);
-//   });
-
-//   lines.push('');
-//   console.log(lines.join('\n'));
-//   return {};
-// }
+export function handleSummary(data) {
+  const value = (name, statistic) => data.metrics[name]?.values?.[statistic] ?? null;
+  const samples = name => (value(name, 'passes') || 0) + (value(name, 'fails') || 0);
+  const thresholds = Object.entries(data.metrics).flatMap(([metric, result]) =>
+    Object.entries(result.thresholds || {}).filter(([, threshold]) => !threshold.ok)
+      .map(([rule]) => `${metric}: ${rule}`));
+  const measurements = {
+    sends: value('chat_sent', 'count'), sendsPerSecond: value('chat_sent', 'rate'),
+    acknowledged: value('chat_acked', 'count'), unacknowledged: value('chat_unacknowledged', 'count') || 0,
+    subscriberObservations: value('chat_received', 'count'),
+    echoP95Ms: value('chat_acked', 'count') > 0 ? value('chat_echo_ms', 'p(95)') : null,
+    echoP99Ms: value('chat_acked', 'count') > 0 ? value('chat_echo_ms', 'p(99)') : null,
+    connectionSuccess: samples('chat_connect_success') ? value('chat_connect_success', 'rate') : null,
+    connectionP95Ms: value('chat_connect_success', 'passes') > 0 ? value('chat_connect_ms', 'p(95)') : null,
+    loginP95Ms: samples('login_success') ? value('login_ms', 'p(95)') : null,
+    historyP95Ms: samples('history_success') ? value('history_ms', 'p(95)') : null,
+  };
+  const complete = (value('chat_sessions_started', 'count') || 0) === (value('chat_sessions_finished', 'count') || 0)
+    && (measurements.sends || 0) === (measurements.acknowledged || 0) + measurements.unacknowledged;
+  const format = number => number === null ? 'n/a' : Number(number).toFixed(2);
+  const report = {
+    createdAt: new Date().toISOString(), config: publicConfig(config), measurements, complete,
+    failedThresholds: thresholds, metrics: data.metrics,
+    note: 'Echo timeouts are unacknowledged sends, not proof of lost database records. Receiver counts do not prove complete fanout.',
+  };
+  const output = [
+    `Chat benchmark: ${config.profile} / ${config.topology}; rooms ${config.rooms.join(',')}`,
+    `Accounting: ${complete ? 'complete' : 'INCOMPLETE - discard this run; sessions or sends were interrupted'}`,
+    `Sends: ${measurements.sends ?? 0}; acknowledged: ${measurements.acknowledged ?? 0}; unacknowledged: ${measurements.unacknowledged}`,
+    `Sender echo p95 / p99: ${format(measurements.echoP95Ms)} / ${format(measurements.echoP99Ms)} ms`,
+    `Mean attempted sends/s (including ramp/drain): ${format(measurements.sendsPerSecond)}`,
+    `Failed thresholds: ${thresholds.length ? thresholds.join('; ') : 'none'}`,
+    report.note, '',
+  ].join('\n');
+  const files = { stdout: output };
+  if (config.reportPrefix) {
+    files[`${config.reportPrefix}.json`] = JSON.stringify(report, null, 2);
+    files[`${config.reportPrefix}.txt`] = output;
+  }
+  return files;
+}

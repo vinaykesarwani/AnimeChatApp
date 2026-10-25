@@ -18,7 +18,7 @@ public class CorsConfig {
         // Allow React dev server
         config.setAllowedOrigins(List.of(
             "http://localhost:3000",
-            "https://chatsanime.netlify.app/"
+            "https://chatsanime.netlify.app"
         ));
 
         // Allow all standard HTTP methods

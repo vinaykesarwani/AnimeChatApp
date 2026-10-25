@@ -26,6 +26,7 @@ public class Message {
 
     @ManyToOne
     @JoinColumn(name = "reply_to_message_id")
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties("replyTo")
     private Message replyTo;
 
     private boolean deleted = false;

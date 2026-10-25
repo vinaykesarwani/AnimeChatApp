@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../services/api';
+import api, { apiError } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
@@ -37,14 +37,14 @@ export default function HomePage() {
   const [creating, setCreating] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
 
-  const fetchAnime = () => {
+  const fetchAnime = useCallback(() => {
     api.get('/api/anime-rooms')
       .then(res => setAnimeList(res.data))
       .catch(() => addToast('Failed to load anime list', 'error'))
       .finally(() => setLoading(false));
-  };
+  }, [addToast]);
 
-  useEffect(() => { fetchAnime(); }, []);
+  useEffect(() => { fetchAnime(); }, [fetchAnime]);
 
   const handleCardClick = (anime) => {
     if (!user) {
@@ -66,7 +66,7 @@ export default function HomePage() {
       setSelectedAnime('');
       fetchAnime();
     } catch (err) {
-      addToast(err.response?.data || 'Anime already exists or failed to create', 'error');
+      addToast(apiError(err, 'Anime already exists or failed to create'), 'error');
     } finally {
       setCreating(false);
     }
@@ -96,7 +96,7 @@ export default function HomePage() {
           <div className="page-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '0.75rem' }}>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--accent)', letterSpacing: '2px' }}>
-                // COMMUNITY FORUMS
+                {'// COMMUNITY FORUMS'}
               </span>
             </div>
             <h1 className="page-title">

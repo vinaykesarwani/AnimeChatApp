@@ -8,6 +8,11 @@ import com.anime.backend.repository.DiscussionRoomRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClientException;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
+import com.anime.backend.service.InputRules;
 
 import java.util.List;
 import java.util.Map;
@@ -29,20 +34,24 @@ public class SimilarityController {
             AnimeRoomRepository animeRoomRepo) {
         this.discussionRoomRepo = discussionRoomRepo;
         this.animeRoomRepo = animeRoomRepo;
-        this.restTemplate = new RestTemplate();
+        var factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(2000);
+        factory.setReadTimeout(5000);
+        this.restTemplate = new RestTemplate(factory);
     }
 
     @PostMapping("/check")
     public CheckResponse check(@RequestBody CheckRequest req) {
-
+        req.setCandidate(InputRules.text(req.getCandidate(), "Title", 1, 255));
+        if (req.getAnimeRoomId() == null || req.getAnimeRoomId() <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Anime room ID is required");
+        }
         // Verify anime exists
         animeRoomRepo.findById(req.getAnimeRoomId())
-                .orElseThrow(() -> new RuntimeException("Anime room not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Anime room not found"));
 
         // Use JOIN FETCH query — avoids lazy loading issues entirely
         List<DiscussionRoom> rooms = discussionRoomRepo.findByAnimeRoomId(req.getAnimeRoomId());
-
-        System.out.println(">>> Found " + rooms.size() + " rooms for animeRoomId " + req.getAnimeRoomId());
 
         if (rooms.isEmpty()) {
             return new CheckResponse(List.of());
@@ -61,20 +70,23 @@ public class SimilarityController {
         pyReq.setCandidate(req.getCandidate());
         pyReq.setExistingTitles(rooms.stream().map(DiscussionRoom::getTitle).collect(Collectors.toList()));
 
-        System.out.println(">>> Calling similarity service with " + pyReq.getExistingTitles().size() + " titles");
-
-        SimilarityResponseDto pyRes = restTemplate.postForObject(
+        SimilarityResponseDto pyRes;
+        try {
+            pyRes = restTemplate.postForObject(
                 similarityServiceUrl + "/similarity",
                 pyReq,
                 SimilarityResponseDto.class
-        );
-
-        if (pyRes == null || pyRes.getResults() == null) {
-            System.out.println(">>> Similarity service returned null");
-            return new CheckResponse(List.of());
+            );
+        } catch (RestClientException error) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Similarity suggestions are temporarily unavailable");
         }
 
-        System.out.println(">>> Got " + pyRes.getResults().size() + " results from similarity service");
+        if (pyRes == null || pyRes.getResults() == null
+                || pyRes.getResults().stream().anyMatch(result -> result == null)) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Similarity service returned an invalid response");
+        }
 
         // Enrich with full DiscussionRoom objects
         List<ScoredRoom> scored = pyRes.getResults().stream()

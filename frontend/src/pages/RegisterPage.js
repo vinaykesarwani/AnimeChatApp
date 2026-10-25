@@ -17,7 +17,7 @@ export default function RegisterPage() {
   const validate = () => {
     const e = {};
     if (!username.trim()) e.username = 'Username is required';
-    else if (username.length < 3) e.username = 'At least 3 characters';
+    else if (username.trim().length < 3) e.username = 'At least 3 characters';
     if (!password) e.password = 'Password is required';
     else if (password.length < 4) e.password = 'At least 4 characters';
     if (password !== confirm) e.confirm = 'Passwords do not match';
@@ -35,6 +35,9 @@ export default function RegisterPage() {
     if (result.success) {
       addToast('Account created! Welcome aboard.', 'success');
       navigate('/');
+    } else if (result.accountCreated) {
+      addToast(result.error, 'info');
+      navigate('/login');
     } else {
       setErrors({ general: typeof result.error === 'string' ? result.error : 'Registration failed' });
     }

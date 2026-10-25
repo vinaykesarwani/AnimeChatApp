@@ -8,4 +8,5 @@ import com.anime.backend.entity.User;
 
 public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByUsername(String username);
+    Optional<User> findByOauthId(String oauthId);
 }

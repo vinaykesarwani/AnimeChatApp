@@ -1,100 +1,136 @@
 #!/usr/bin/env node
-/**
- * seed-users.js
- * Registers N test users against your Spring Boot backend.
- * Usage:
- *   node seed-users.js [count] [prefix] [password] [baseUrl]
- * Defaults:
- *   node seed-users.js 100 testuser Password123 http://localhost:8080
- */
+'use strict';
 
-const http = require('http');
-const https = require('https');
+// Prepare fixtures before a benchmark so registration is outside the measured load.
+const TIMEOUT_MS = 15000;
 
-const COUNT    = parseInt(process.argv[2])  || 100;
-const PREFIX   = process.argv[3]            || 'testuser';
-const PASSWORD = process.argv[4]            || 'Password123';
-const BASE_URL = process.argv[5]            || 'http://localhost:8080';
-
-const CONCURRENCY = 10; // parallel registration requests
-
-function post(url, body) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const parsed = new URL(url);
-    const lib = parsed.protocol === 'https:' ? https : http;
-    const req = lib.request({
-      hostname: parsed.hostname,
-      port: parsed.port,
-      path: parsed.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
-      },
-    }, (res) => {
-      let raw = '';
-      res.on('data', d => raw += d);
-      res.on('end', () => resolve({ status: res.statusCode, body: raw }));
-    });
-    req.on('error', reject);
-    req.write(data);
-    req.end();
-  });
+function positiveInteger(name, fallback) {
+  const value = process.env[name] === undefined ? String(fallback) : process.env[name];
+  if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return Number(value);
 }
 
-async function registerUser(index) {
-  const username = `${PREFIX}${index}`;
-  try {
-    const res = await post(`${BASE_URL}/api/users`, { username, password: PASSWORD });
-    if (res.status === 200 || res.status === 201) {
-      process.stdout.write(`\r✓ ${username} registered (${index}/${COUNT})`);
-      return { username, ok: true };
-    } else if (res.status === 409 || res.body?.toLowerCase().includes('exist')) {
-      process.stdout.write(`\r~ ${username} already exists (${index}/${COUNT})`);
-      return { username, ok: true, skipped: true };
-    } else {
-      return { username, ok: false, error: `HTTP ${res.status}: ${res.body}` };
+async function main() {
+  const users = positiveInteger('USERS', 100);
+  const roomCount = positiveInteger('ROOM_COUNT', 3);
+  const prefix = process.env.USER_PREFIX || 'loaduser_';
+  const password = process.env.PASSWORD;
+  const base = (process.env.BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
+  let target;
+  try { target = new URL(base); }
+  catch { throw new Error('BASE_URL must be an HTTP or HTTPS URL.'); }
+  if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password
+      || target.search || target.hash) {
+    throw new Error('BASE_URL must be an HTTP or HTTPS URL without credentials, a query, or a fragment.');
+  }
+  if (typeof password !== 'string' || password.trim().length === 0
+      || password.length < 4 || Buffer.byteLength(password, 'utf8') > 72) {
+    throw new Error('Set PASSWORD to at least 4 characters and at most 72 UTF-8 bytes.');
+  }
+  if (prefix.trim() !== prefix || `${prefix}1`.length < 3 || `${prefix}${users}`.length > 255
+      || `${prefix}benchmark`.length > 255) {
+    throw new Error('USER_PREFIX must produce usernames and an anime name of 3 to 255 characters without surrounding spaces.');
+  }
+
+  async function request(path, method = 'GET', body, token) {
+    const headers = {};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      return await fetch(`${base}${path}`, {
+        method, headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (error) {
+      const reason = error.name === 'TimeoutError' ? 'timed out' : 'failed';
+      throw new Error(`${method} ${path.split('?')[0]} ${reason}.`);
     }
-  } catch (err) {
-    return { username, ok: false, error: err.message };
   }
-}
 
-async function runInBatches(total, concurrency, fn) {
-  const results = [];
-  for (let i = 0; i < total; i += concurrency) {
-    const batch = [];
-    for (let j = i; j < Math.min(i + concurrency, total); j++) {
-      batch.push(fn(j + 1));
+  async function json(response, label) {
+    try { return await response.json(); }
+    catch { throw new Error(`${label} returned invalid JSON.`); }
+  }
+
+  async function list(path, token) {
+    const response = await request(path, 'GET', undefined, token);
+    if (response.status !== 200) throw new Error(`GET ${path} returned HTTP ${response.status}.`);
+    const items = await json(response, path);
+    if (!Array.isArray(items)) throw new Error(`GET ${path} did not return a list.`);
+    return items;
+  }
+
+  function validId(value) {
+    return Number.isSafeInteger(value) && value > 0;
+  }
+
+  let fixtureToken;
+  let createdUsers = 0;
+  for (let index = 1; index <= users; index += 1) {
+    const username = `${prefix}${index}`;
+    const registered = await request('/api/users', 'POST', { username, password });
+    // A conflict is acceptable only if the supplied password subsequently authenticates.
+    if (![201, 409].includes(registered.status)) {
+      throw new Error(`Registration for user ${index} returned HTTP ${registered.status}.`);
     }
-    results.push(...await Promise.all(batch));
+    if (registered.status === 201) createdUsers += 1;
+    await registered.arrayBuffer();
+    const loggedIn = await request('/api/auth/login', 'POST', { username, password });
+    if (loggedIn.status !== 200) {
+      throw new Error(`Login verification for user ${index} returned HTTP ${loggedIn.status}.`);
+    }
+    const session = await json(loggedIn, 'Login verification');
+    if (!session || typeof session.token !== 'string' || session.token.length === 0
+        || !session.user || session.user.username !== username) {
+      throw new Error(`Login verification for user ${index} returned an unexpected identity or token.`);
+    }
+    if (index === 1) fixtureToken = session.token;
   }
-  return results;
+
+  const animeName = `${prefix}benchmark`;
+  const animeRooms = await list('/api/anime-rooms', fixtureToken);
+  let anime = animeRooms.find(room => room.name === animeName);
+  if (!anime) {
+    const created = await request(`/api/anime-rooms?name=${encodeURIComponent(animeName)}`,
+      'POST', undefined, fixtureToken);
+    if (created.status !== 200 && created.status !== 201) {
+      throw new Error(`Anime fixture creation returned HTTP ${created.status}.`);
+    }
+    anime = await json(created, 'Anime fixture creation');
+  }
+  if (!anime || !validId(anime.id) || anime.name !== animeName) {
+    throw new Error('Anime fixture returned an unexpected room.');
+  }
+
+  const discussions = await list('/api/discussion-rooms', fixtureToken);
+  const roomIds = [];
+  for (let index = 1; index <= roomCount; index += 1) {
+    const title = `benchmark-room-${index}`;
+    let room = discussions.find(item => item.title === title && item.animeRoom?.id === anime.id);
+    if (!room) {
+      const created = await request('/api/discussion-rooms', 'POST', {
+        animeRoomId: anime.id, title,
+      }, fixtureToken);
+      if (created.status !== 200 && created.status !== 201) {
+        throw new Error(`Discussion fixture ${index} creation returned HTTP ${created.status}.`);
+      }
+      room = await json(created, `Discussion fixture ${index} creation`);
+    }
+    if (!room || !validId(room.id) || room.animeRoom?.id !== anime.id || room.title !== title) {
+      throw new Error(`Discussion fixture ${index} returned an unexpected room.`);
+    }
+    roomIds.push(room.id);
+  }
+
+  console.log(`Ready: ${users} verified users (${createdUsers} created, ${users - createdUsers} existing).`);
+  console.log(`USER_PREFIX=${prefix}`);
+  console.log(`ROOM_IDS=${roomIds.join(',')}`);
 }
 
-(async () => {
-  console.log(`\nSeeding ${COUNT} users → ${BASE_URL}`);
-  console.log(`Prefix: ${PREFIX}1 … ${PREFIX}${COUNT}  |  Password: ${PASSWORD}`);
-  console.log(`Concurrency: ${CONCURRENCY} parallel requests\n`);
-
-  const start = Date.now();
-  const results = await runInBatches(COUNT, CONCURRENCY, registerUser);
-  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-
-  const ok      = results.filter(r => r.ok && !r.skipped).length;
-  const skipped = results.filter(r => r.skipped).length;
-  const failed  = results.filter(r => !r.ok);
-
-  console.log(`\n\n──────────────────────────────`);
-  console.log(`Done in ${elapsed}s`);
-  console.log(`  Registered : ${ok}`);
-  console.log(`  Already existed : ${skipped}`);
-  console.log(`  Failed     : ${failed.length}`);
-  if (failed.length) {
-    console.log(`\nFailed users:`);
-    failed.forEach(f => console.log(`  ${f.username}: ${f.error}`));
-  }
-  console.log(`\nUsers ready: ${PREFIX}1 … ${PREFIX}${COUNT}`);
-  console.log(`Password  : ${PASSWORD}`);
-})();
+main().catch(error => {
+  console.error(`Fixture setup failed: ${error.message}`);
+  process.exitCode = 1;
+});

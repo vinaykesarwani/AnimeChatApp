@@ -4,6 +4,8 @@ import java.util.List;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.anime.backend.dto.DiscussionRoomCreateDto;
 import com.anime.backend.dto.DiscussionRoomUpdateDto;
@@ -31,16 +33,21 @@ public class DiscussionRoomService {
     }
 
     public DiscussionRoom create(DiscussionRoomCreateDto dto, String username) {
+        dto.setTitle(InputRules.text(dto.getTitle(), "Title", 1, 255));
+        if (dto.getAnimeRoomId() == null || dto.getAnimeRoomId() <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Anime room ID is required");
+        }
         AnimeRoom anime = animeRepo.findById(dto.getAnimeRoomId())
-                .orElseThrow(() -> new RuntimeException("Anime room not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Anime room not found"));
 
         if (repo.existsByAnimeRoomAndTitle(anime, dto.getTitle()))
-            throw new RuntimeException("Discussion already exists");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Discussion already exists");
 
         DiscussionRoom room = new DiscussionRoom();
         room.setTitle(dto.getTitle());
         room.setAnimeRoom(anime);
-        room.setCreatedBy(userRepo.findByUsername(username).orElseThrow());
+        room.setCreatedBy(userRepo.findByUsername(username).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found")));
 
         return repo.save(room);
     }
@@ -50,8 +57,9 @@ public class DiscussionRoomService {
     }
 
     public DiscussionRoom update(Long id, DiscussionRoomUpdateDto dto) {
+        dto.setTitle(InputRules.text(dto.getTitle(), "Title", 1, 255));
         DiscussionRoom room = repo.findById(id)
-                .orElseThrow(() -> new RuntimeException("Discussion room not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Discussion room not found"));
 
         room.setTitle(dto.getTitle());
         return repo.save(room);
@@ -59,7 +67,7 @@ public class DiscussionRoomService {
 
     public void delete(Long id) {
         DiscussionRoom room = repo.findById(id)
-                .orElseThrow(() -> new RuntimeException("Discussion room not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Discussion room not found"));
 
         repo.delete(room);
     }

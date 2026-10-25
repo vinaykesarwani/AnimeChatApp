@@ -17,6 +17,9 @@ import com.anime.backend.entity.AnimeRoom;
 import com.anime.backend.entity.User;
 import com.anime.backend.repository.AnimeRoomRepository;
 import com.anime.backend.repository.UserRepository;
+import com.anime.backend.service.InputRules;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/anime-rooms")
@@ -37,10 +40,12 @@ public class AnimeRoomController {
 
     @PostMapping
     public AnimeRoom createRoom(@RequestParam String name, Principal principal) {
+        name = InputRules.text(name, "Anime name", 1, 255);
         if (repo.existsByName(name))
-            throw new RuntimeException("Anime already exists");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Anime already exists");
 
-        User user = userRepo.findByUsername(principal.getName()).get();
+        User user = userRepo.findByUsername(principal.getName()).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
 
         AnimeRoom room = new AnimeRoom();
         room.setName(name);
@@ -51,7 +56,8 @@ public class AnimeRoomController {
     @PutMapping("/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public AnimeRoom updateRoom(@PathVariable Long id, @RequestParam String name) {
-        AnimeRoom room = repo.findById(id).orElseThrow(() -> new RuntimeException("Room not found"));
+        name = InputRules.text(name, "Anime name", 1, 255);
+        AnimeRoom room = repo.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Room not found"));
         room.setName(name);
         return repo.save(room);
     }
@@ -60,7 +66,7 @@ public class AnimeRoomController {
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public void deleteRoom(@PathVariable Long id) {
-        AnimeRoom room = repo.findById(id).orElseThrow(() -> new RuntimeException("Room not found"));
+        AnimeRoom room = repo.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Room not found"));
         repo.delete(room);
     }
 }

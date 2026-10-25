@@ -9,4 +9,5 @@ import com.anime.backend.entity.Message;
 public interface MessageRepository extends JpaRepository<Message, Long> {
     List<Message> findByDiscussionRoomId(Long discussionRoomId);
     List<Message> findByDiscussionRoomIdOrderByCreatedAtAsc(Long discussionRoomId);
+    List<Message> findByDiscussionRoomIdOrderByCreatedAtAscIdAsc(Long discussionRoomId);
 }

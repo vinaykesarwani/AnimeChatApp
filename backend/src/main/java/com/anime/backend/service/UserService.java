@@ -24,39 +24,47 @@ public class UserService {
     }
 
     public User createUser(UserCreateDto dto) {
+        dto.setUsername(InputRules.text(dto.getUsername(), "Username", 3, 255));
+        InputRules.password(dto.getPassword());
         if (userRepo.findByUsername(dto.getUsername()).isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Username already taken");
         }
         User user = new User();
         user.setUsername(dto.getUsername());
         user.setPassword(encoder.encode(dto.getPassword()));
-        user.setRole(dto.getRole() != null ? dto.getRole() : Role.USER);
+        // Public registration must never grant a role supplied by the client.
+        user.setRole(Role.USER);
         return userRepo.save(user);
     }
 
     public User updateUser(Long id, UserUpdateDto dto, String requester) {
-        User user = userRepo.findById(id).orElseThrow();
+        User user = userRepo.findById(id).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
         if (!isSelfOrAdmin(user, requester))
-            throw new RuntimeException("Not allowed");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed");
 
-        if (dto.getPassword() != null)
+        if (dto.getPassword() != null) {
+            InputRules.password(dto.getPassword());
             user.setPassword(encoder.encode(dto.getPassword()));
+        }
 
         return userRepo.save(user);
     }
 
     public void deleteUser(Long id, String requester) {
-        User user = userRepo.findById(id).orElseThrow();
+        User user = userRepo.findById(id).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
         if (!isSelfOrAdmin(user, requester))
-            throw new RuntimeException("Not allowed");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed");
 
         userRepo.delete(user);
     }
 
     private boolean isSelfOrAdmin(User target, String requester) {
-        User req = userRepo.findByUsername(requester).orElseThrow();
+        User req = userRepo.findByUsername(requester).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
         return req.getRole() == Role.ADMIN || target.getUsername().equals(requester);
     }
 }

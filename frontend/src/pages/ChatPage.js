@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { applyMessageEvent, mergeHistory } from '../services/messageState';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -38,45 +39,61 @@ export default function ChatPage() {
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // credentials comes directly from AuthContext where it is set atomically
-  // with user — eliminating the render gap that caused "not connected"
+  const historyRequest = useRef(0);
+  const historyBuffer = useRef(null);
 
-  // WS handler
-  const handleWsMessage = useCallback((event) => {
-    if (event.type === 'CREATE') {
-      setMessages(prev => {
-        if (prev.find(m => m.id === event.message.id)) return prev;
-        return [...prev, event.message];
-      });
-    } else if (event.type === 'EDIT') {
-      setMessages(prev => prev.map(m => m.id === event.message.id ? event.message : m));
-    } else if (event.type === 'DELETE') {
-      // Backend sends { type: 'DELETE', message: null, messageId: Long }
-      // Field is 'messageId' NOT 'deletedMessageId' — mismatch was silently ignoring deletes
-      setMessages(prev => prev.filter(m => m.id !== event.messageId));
+  const reloadHistory = useCallback(async () => {
+    const request = ++historyRequest.current;
+    const liveEvents = [];
+    historyBuffer.current = liveEvents;
+    try {
+      const response = await api.get('/api/messages/discussion/' + roomId);
+      if (request === historyRequest.current) {
+        setMessages(mergeHistory(response.data, liveEvents));
+      }
+    } catch {
+      if (request === historyRequest.current) addToast('Failed to load messages. Reconnect to retry.', 'error');
+    } finally {
+      if (request === historyRequest.current) historyBuffer.current = null;
     }
+  }, [roomId, addToast]);
+
+  const handleWsMessage = useCallback((event) => {
+    if (historyBuffer.current) historyBuffer.current.push(event);
+    setMessages(previous => applyMessageEvent(previous, event));
   }, []);
 
+  const handleWsError = useCallback((message) => {
+    addToast(message || 'Message operation failed', 'error');
+  }, [addToast]);
+
   const { status, sendMessage, editMessage, deleteMessage } = useWebSocket(
-    roomId, credentials, handleWsMessage
+    roomId, credentials, handleWsMessage, reloadHistory, handleWsError
   );
 
-  // Load room info & history
   useEffect(() => {
-    // Get room info (fetch all, filter)
+    let active = true;
+    setMessages([]);
+    setRoomInfo(null);
+    setReplyTo(null);
+    setEditingId(null);
+    setEditContent('');
+    setInput('');
     api.get('/api/discussion-rooms')
-      .then(res => {
-        const room = res.data.find(r => String(r.id) === String(roomId));
+      .then(response => {
+        if (!active) return;
+        const room = response.data.find(item => String(item.id) === String(roomId));
         if (!room) { navigate('/'); return; }
         setRoomInfo(room);
       })
-      .catch(() => navigate('/'));
-
-    // Load message history
-    api.get(`/api/messages/discussion/${roomId}`)
-      .then(res => setMessages(res.data))
-      .catch(() => addToast('Failed to load messages', 'error'));
-  }, [roomId]);
+      .catch(() => { if (active) addToast('Failed to load room information', 'error'); });
+    reloadHistory();
+    return () => {
+      active = false;
+      historyRequest.current += 1;
+      historyBuffer.current = null;
+    };
+  }, [roomId, navigate, addToast, reloadHistory]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -105,25 +122,28 @@ export default function ChatPage() {
 
   const handleEditSave = () => {
     if (!editContent.trim()) return;
-    editMessage(editingId, editContent.trim());
+    if (!editMessage(editingId, editContent.trim())) {
+      addToast('Not connected. Your edit has been kept.', 'error');
+      return;
+    }
     setEditingId(null);
     setEditContent('');
   };
 
   const handleDelete = (msgId) => {
     if (!window.confirm('Delete this message?')) return;
-    deleteMessage(msgId);
+    if (!deleteMessage(msgId)) addToast('Not connected. Please try again.', 'error');
   };
 
   const canModify = (msg) => {
-    if (!user) return false;
+    if (!user || msg.deleted) return false;
     return user.role === 'ADMIN' || msg.sender?.username === user.username;
   };
 
   const connStatus = {
     connected: { label: 'CONNECTED — LIVE', cls: 'connected' },
     connecting: { label: 'CONNECTING...', cls: 'connecting' },
-    disconnected: { label: 'DISCONNECTED — RECONNECTING', cls: 'disconnected' },
+    disconnected: { label: 'DISCONNECTED', cls: 'disconnected' },
   }[status];
 
   return (
@@ -203,6 +223,7 @@ export default function ChatPage() {
                         <input
                           className="form-input"
                           style={{ fontSize: '0.875rem' }}
+                          maxLength={2000}
                           value={editContent}
                           onChange={e => setEditContent(e.target.value)}
                           onKeyDown={e => {
@@ -227,6 +248,7 @@ export default function ChatPage() {
                       <button
                         className="msg-action-btn"
                         title="Reply"
+                        disabled={msg.deleted}
                         onClick={() => { setReplyTo(msg); textareaRef.current?.focus(); }}
                       >↩</button>
                       {canModify(msg) && (
@@ -264,6 +286,7 @@ export default function ChatPage() {
             <textarea
               ref={textareaRef}
               className="chat-textarea"
+              maxLength={2000}
               placeholder={`Message ${roomInfo?.title || 'room'}...`}
               value={input}
               onChange={e => setInput(e.target.value)}

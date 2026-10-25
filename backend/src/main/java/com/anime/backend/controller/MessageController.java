@@ -21,6 +21,9 @@ import com.anime.backend.entity.User;
 import com.anime.backend.repository.MessageRepository;
 import com.anime.backend.repository.UserRepository;
 import com.anime.backend.service.MessageService;
+import com.anime.backend.service.InputRules;
+import com.anime.backend.dto.MessageEvent;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 @RestController
 @RequestMapping("/api/messages")
@@ -29,17 +32,19 @@ public class MessageController {
     private final MessageService messageService;
     private final MessageRepository messageRepo;
     private final UserRepository userRepo;
+    private final SimpMessagingTemplate messagingTemplate;
 
 
-    public MessageController(MessageService messageService, MessageRepository messageRepo, UserRepository userRepo) {
+    public MessageController(MessageService messageService, MessageRepository messageRepo, UserRepository userRepo, SimpMessagingTemplate messagingTemplate) {
         this.messageService = messageService;
         this.messageRepo = messageRepo;
         this.userRepo=userRepo;
+        this.messagingTemplate = messagingTemplate;
     }
 
     @GetMapping("/discussion/{roomId}")
     public List<Message> getMessages(@PathVariable Long roomId) {
-        return messageRepo.findByDiscussionRoomIdOrderByCreatedAtAsc(roomId);
+        return messageRepo.findByDiscussionRoomIdOrderByCreatedAtAscIdAsc(roomId);
     }
 
     @PutMapping("/{id}")
@@ -58,7 +63,7 @@ public class MessageController {
 
         // Fetch the message
         Message msg = messageRepo.findById(id)
-                .orElseThrow(() -> new RuntimeException("Message not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
 
         // Only Admin or Owner can edit
         if (user.getRole() != Role.ADMIN && !msg.getSender().getId().equals(user.getId())) {
@@ -66,8 +71,14 @@ public class MessageController {
         }
 
         // Update content
-        msg.setContent(newContent);
-        return messageRepo.save(msg);
+        if (msg.isDeleted()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted messages cannot be edited");
+        }
+        msg.setContent(InputRules.text(newContent, "Message", 1, 2000));
+        Message updated = messageRepo.save(msg);
+        messagingTemplate.convertAndSend("/topic/chat/" + msg.getDiscussionRoom().getId(),
+                new MessageEvent("EDIT", updated, id, System.currentTimeMillis()));
+        return updated;
     }
 
 
@@ -81,14 +92,19 @@ public class MessageController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
 
         Message msg = messageRepo.findById(id)
-                .orElseThrow(() -> new RuntimeException("Message not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
 
         // Admin OR owner
         if (user.getRole() != Role.ADMIN && !msg.getSender().getId().equals(user.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed");
         }
 
-        messageRepo.delete(msg);
+        if (msg.isDeleted()) return;
+        msg.setDeleted(true);
+        msg.setContent("[deleted]");
+        messageRepo.save(msg);
+        messagingTemplate.convertAndSend("/topic/chat/" + msg.getDiscussionRoom().getId(),
+                new MessageEvent("DELETE", msg, id, System.currentTimeMillis()));
     }
 
 
