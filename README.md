@@ -56,7 +56,7 @@ A scalable full-stack real-time chat platform built using **Spring Boot**, **Rea
 # Testing
 
 * JUnit and Mockito
-* React Testing Library
+* Python unittest
 * k6 (Load Testing)
 
 ---
@@ -130,12 +130,53 @@ Set `REACT_APP_API_URL` if the backend is not running at `http://localhost:8080`
 
 The login and registration pages both have **Continue with Google**. Returning Google users keep their existing account; the first Google login creates a user account. Username/password and GitHub login remain available.
 
-## 📈 Future Enhancements
+## Docker Compose (local)
 
-AI-Powered Discussion Recommendations: Uses AI-generated rolling chat summaries to suggest discussion rooms that align with users' interests and ongoing conversations.
-Community Anime Recommendations: Enables users to request anime suggestions based on descriptions, with community responses ranked through an upvote-based reputation system.
-Enhanced User Profiles: Provides personalized profiles showcasing activity statistics, contributions, interests, and community reputation.
-Push Notifications: Delivers real-time notifications for messages, mentions, room activity, and community interactions.
+Requires Docker and Compose 2.30+. Run these commands from the project root.
+
+1. Create the root `.env` file once:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Set `MYSQL_ROOT_PASSWORD` and `MYSQL_PASSWORD` to different passwords. Put values in single quotes if they contain `$` or `#`. Docker uses a separate MySQL database; your local MySQL can keep running.
+
+2. Add your JWT secret and OAuth credentials to `backend/.env`. Copy `backend/.env.example` if the file does not exist. Keep values unquoted here. Compose supplies the Docker database settings. Both `.env` files are ignored by Git.
+
+3. Make sure ports 3000 and 8080 are free, then start the app:
+
+```powershell
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 300
+docker compose ps
+```
+
+Open http://localhost:3000. The first build also downloads the similarity model.
+
+4. Check logs or stop the containers:
+
+```powershell
+docker compose logs --tail=100
+docker compose down
+```
+
+Database records stay in the `mysql-data` volume after shutdown. `docker compose down -v` deletes them. Editing passwords in `.env` does not update an existing database.
+
+## CI/CD
+
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes and pull requests to `main`. You can also start it from the Actions tab.
+
+- Run backend unit and integration tests.
+- Build the frontend.
+- Build all three Docker images and run the Python unit test.
+- After checks pass on `main`, publish the images to GHCR with a `sha-<commit>` tag.
+
+Publishing uses GitHub's built-in `GITHUB_TOKEN`. Backend test reports are available for seven days. Run k6 tests separately using the [test commands](k6/RUN_TESTS.md).
+
+Set the repository variable `REACT_APP_API_URL` before building for hosting. It defaults to `http://localhost:8080`.
+
+Deployment will be added once hosting is chosen.
 
 ---
 

@@ -1,0 +1,89 @@
+name: animechat
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: animechat
+      MYSQL_USER: animechat
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the root .env file}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the root .env file}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # Check the app user's connection, not just whether MySQL is running.
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP
+          --host=127.0.0.1 --user="$${MYSQL_USER}" --database="$${MYSQL_DATABASE}"
+          --execute="SELECT 1" --silent > /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  similarity-service:
+    build: ./similarity-service
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file:
+      # Reuse JWT and OAuth credentials without expanding any $ characters.
+      - path: ./backend/.env
+        format: raw
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/animechat?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      DB_USER: animechat
+      DB_PASS: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the root .env file}
+      PORT: "8080"
+      FRONTEND_URL: http://localhost:3000
+      SIMILARITY_SERVICE_URL: http://similarity-service:8000
+      SPRING_JPA_SHOW_SQL: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      # This existing public endpoint also reads from the database.
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "4", "--output", "/dev/null", "http://127.0.0.1:8080/api/anime-rooms"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # React runs in the browser, so it uses the published backend URL.
+        REACT_APP_API_URL: http://localhost:8080
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  mysql-data:

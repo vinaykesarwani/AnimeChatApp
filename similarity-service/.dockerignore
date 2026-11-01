@@ -1,0 +1,4 @@
+# Only these two files are needed to build the service.
+**
+!requirements.txt
+!main.py

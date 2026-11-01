@@ -1,0 +1,22 @@
+# Exclude everything, then allow only the frontend build inputs.
+**
+!package.json
+!package-lock.json
+!src/**
+!public/**
+!nginx.conf
+
+# Keep secrets, tests and generated files out of the build.
+**/.env*
+**/node_modules
+**/__tests__
+**/*.test.*
+**/*.spec.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.zip
+**/*.log
+**/*.bak

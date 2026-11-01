@@ -1,0 +1,144 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REACT_APP_API_URL: ${{ vars.REACT_APP_API_URL || 'http://localhost:8080' }}
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - name: Run existing unit and integration tests
+        working-directory: backend
+        run: bash ./mvnw -B -ntp verify
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests
+          path: backend/target/surefire-reports/
+          retention-days: 7
+          overwrite: true
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build React
+        working-directory: frontend
+        run: npm run build
+
+  docker:
+    name: Docker builds and Python test
+    needs: [backend, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build backend image
+        run: |
+          docker build --pull --tag animechat-backend:ci \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            ./backend
+      - name: Build frontend image
+        run: |
+          docker build --pull --tag animechat-frontend:ci \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --build-arg "REACT_APP_API_URL=$REACT_APP_API_URL" \
+            ./frontend
+      - name: Build similarity-service image
+        run: |
+          docker build --pull --tag animechat-similarity-service:ci \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            ./similarity-service
+      - name: Run the existing Python unit test
+        # Pass the test through stdin; it stays outside the application image.
+        run: |
+          docker run --rm --interactive --network none --entrypoint python \
+            animechat-similarity-service:ci - < similarity-service/test_main.py
+      - name: Save the checked images for publishing
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          docker save --output "$RUNNER_TEMP/animechat-images.tar" \
+            animechat-backend:ci animechat-frontend:ci animechat-similarity-service:ci
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          name: container-images
+          path: ${{ runner.temp }}/animechat-images.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Publish images to GHCR
+    needs: docker
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: container-images
+          path: ${{ runner.temp }}
+      - name: Load the images built by CI
+        run: docker load --input "$RUNNER_TEMP/animechat-images.tar"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish each image with the commit ID
+        run: |
+          image_prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          for service in backend frontend similarity-service; do
+            image="${image_prefix}-${service}:sha-${GITHUB_SHA}"
+            docker tag "animechat-${service}:ci" "$image"
+            docker push "$image"
+          done

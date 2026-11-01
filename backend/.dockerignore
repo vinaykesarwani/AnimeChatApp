@@ -1,0 +1,21 @@
+# Exclude everything, then allow only the backend build inputs.
+**
+!pom.xml
+!mvnw
+!.mvn/wrapper/maven-wrapper.properties
+!src/main/java/**
+!src/main/resources/application.properties
+
+# Keep secrets and generated files out, even if placed beside Java source.
+**/.env*
+**/application-local*.properties
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.zip
+**/*.jar
+**/*.class
+**/*.log
+**/*.bak
